@@ -1,0 +1,23 @@
+﻿# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# --- Variables de entorno / secretos (NUNCA subir) ---
+.env
+*.env
+
+# --- Datos pesados de entrenamiento (videos, CSVs) ---
+training/data/*
+!training/data/.gitkeep
+
+# --- Editores / IDE ---
+.vscode/
+.idea/
+*.iml
+
+# --- Sistema operativo ---
+Thumbs.db
+.DS_Store
