@@ -2,9 +2,13 @@ import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-import '../core/geometria.dart';
+//import '../core/geometria.dart';
+//import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 
-import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
+//nuevos imports
+import '../ejercicios/sentadilla.dart';
+import '../core/motor_ejercicio.dart';
+import '../ejercicios/receta_ejercicio.dart';
 
 import '../ml/detector_pose.dart';
 import 'pintor_esqueleto.dart';
@@ -29,7 +33,14 @@ class _PantallaCamaraState extends State<PantallaCamara> {
 
   bool _procesando = false;
   ResultadoPose? _resultado; // última pose detectada
-  double _anguloRodilla = 0; // verificación temporal de la geometría
+  //double _anguloRodilla = 0; // verificación temporal de la geometría
+
+  final MotorEjercicio _motor = MotorEjercicio(recetaSentadilla);
+  int _repeticiones = 0;
+  double _anguloActual = 0;
+  FaseMovimiento _fase = FaseMovimiento.arriba;
+  List<ReglaForma> _errores = [];
+
 
   @override
   void initState() {
@@ -87,23 +98,19 @@ class _PantallaCamaraState extends State<PantallaCamara> {
         camara: _camaraActiva!,
       );
       //if (mounted) setState(() => _resultado = resultado);
-      // Cálculo temporal del ángulo de la rodilla derecha (solo para verificar).
-      double angulo = 0;
       if (resultado.poses.isNotEmpty) {
-        final pose = resultado.poses.first;
-        final cadera = punto(pose, PoseLandmarkType.rightHip);
-        final rodilla = punto(pose, PoseLandmarkType.rightKnee);
-        final tobillo = punto(pose, PoseLandmarkType.rightAnkle);
-        if (cadera != null && rodilla != null && tobillo != null) {
-          angulo = calcularAngulo(cadera, rodilla, tobillo);
+        final evaluacion = _motor.evaluar(resultado.poses.first);
+        if (evaluacion != null) {
+          _repeticiones = evaluacion.repeticiones;
+          _anguloActual = evaluacion.anguloPrincipal;
+          _fase = evaluacion.fase;
+          _errores = evaluacion.erroresActivos;
         }
+      } else {
+        _errores = [];
       }
-      if (mounted) {
-        setState(() {
-          _resultado = resultado;
-          _anguloRodilla = angulo;
-        });
-      }
+      if (mounted) setState(() => _resultado = resultado);
+
     } catch (e) {
       debugPrint('Error procesando frame: $e');
     } finally {
@@ -121,8 +128,16 @@ class _PantallaCamaraState extends State<PantallaCamara> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Cámara')),
+      appBar: AppBar(title: Text(recetaSentadilla.nombre)),
       body: _construirCuerpo(),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () {
+          _motor.reiniciar();
+          setState(() => _repeticiones = 0);
+        },
+        icon: const Icon(Icons.refresh),
+        label: const Text('Reiniciar'),
+      ),
     );
   }
 
@@ -169,14 +184,65 @@ class _PantallaCamaraState extends State<PantallaCamara> {
           top: 16,
           left: 16,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            color: Colors.black54,
-            child: Text(
-              'Rodilla: ${_anguloRodilla.toStringAsFixed(0)}°',
-              style: const TextStyle(color: Colors.white, fontSize: 18),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            decoration: BoxDecoration(
+              color: Colors.black54,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Reps: $_repeticiones',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 28,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                Text(
+                  'Ángulo: ${_anguloActual.toStringAsFixed(0)}°  ·  '
+                  '${_fase == FaseMovimiento.abajo ? "ABAJO" : "ARRIBA"}',
+                  style: const TextStyle(color: Colors.white70, fontSize: 14),
+                ),
+              ],
             ),
           ),
         ),
+        
+        // Banner de errores de forma (abajo de la pantalla).
+        if (_errores.isNotEmpty)
+          Positioned(
+            bottom: 24,
+            left: 16,
+            right: 16,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: _errores.map((e) {
+                final color = e.severidad == Severidad.alta
+                    ? Colors.redAccent
+                    : Colors.orangeAccent;
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 8),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: color.withOpacity(0.9),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    e.mensaje,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
       ],
     );
   }
