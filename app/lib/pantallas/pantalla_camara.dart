@@ -13,6 +13,9 @@ import '../ejercicios/receta_ejercicio.dart';
 import '../ml/detector_pose.dart';
 import 'pintor_esqueleto.dart';
 
+//servicio de voz
+import '../servicios/servicio_voz.dart';
+
 class PantallaCamara extends StatefulWidget {
   final List<CameraDescription> camaras;
 
@@ -36,6 +39,8 @@ class _PantallaCamaraState extends State<PantallaCamara> {
   //double _anguloRodilla = 0; // verificación temporal de la geometría
 
   final MotorEjercicio _motor = MotorEjercicio(recetaSentadilla);
+  final ServicioVoz _voz = ServicioVoz(); //servicio de voz
+
   int _repeticiones = 0;
   double _anguloActual = 0;
   FaseMovimiento _fase = FaseMovimiento.arriba;
@@ -46,6 +51,7 @@ class _PantallaCamaraState extends State<PantallaCamara> {
   void initState() {
     super.initState();
     _iniciarCamara();
+    _voz.inicializar();
   }
 
   Future<void> _iniciarCamara() async {
@@ -101,10 +107,21 @@ class _PantallaCamaraState extends State<PantallaCamara> {
       if (resultado.poses.isNotEmpty) {
         final evaluacion = _motor.evaluar(resultado.poses.first);
         if (evaluacion != null) {
+          final repsAntes = _repeticiones;
           _repeticiones = evaluacion.repeticiones;
           _anguloActual = evaluacion.anguloPrincipal;
           _fase = evaluacion.fase;
           _errores = evaluacion.erroresActivos;
+          //logica de voz
+          // Feedback por voz: prioriza el error más grave;
+          // si no hay errores y se completó una rep, anuncia el número.
+          if (_errores.isNotEmpty) {
+            final graves =
+                _errores.where((e) => e.severidad == Severidad.alta);
+            _voz.decir((graves.isNotEmpty ? graves.first : _errores.first).mensaje);
+          } else if (_repeticiones > repsAntes) {
+            _voz.decirNumero(_repeticiones);
+          }
         }
       } else {
         _errores = [];
@@ -121,6 +138,7 @@ class _PantallaCamaraState extends State<PantallaCamara> {
   @override
   void dispose() {
     _detectorPose.cerrar();
+    _voz.cerrar();
     _controlador?.dispose();
     super.dispose();
   }
@@ -132,6 +150,7 @@ class _PantallaCamaraState extends State<PantallaCamara> {
       body: _construirCuerpo(),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () {
+          _voz.reiniciar();
           _motor.reiniciar();
           setState(() => _repeticiones = 0);
         },
