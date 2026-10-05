@@ -6,7 +6,7 @@ import 'package:permission_handler/permission_handler.dart';
 //import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 
 //nuevos imports
-import '../ejercicios/sentadilla.dart';
+//import '../ejercicios/sentadilla.dart';
 import '../core/motor_ejercicio.dart';
 import '../ejercicios/receta_ejercicio.dart';
 
@@ -16,10 +16,19 @@ import 'pintor_esqueleto.dart';
 //servicio de voz
 import '../servicios/servicio_voz.dart';
 
+//supabase
+//import 'package:supabase_flutter/supabase_flutter.dart';
+import '../servicios/servicio_sesiones.dart';
+
 class PantallaCamara extends StatefulWidget {
   final List<CameraDescription> camaras;
+  final RecetaEjercicio receta;
 
-  const PantallaCamara({super.key, required this.camaras});
+  const PantallaCamara({
+    super.key,
+    required this.camaras,
+    required this.receta,
+  });
 
   @override
   State<PantallaCamara> createState() => _PantallaCamaraState();
@@ -38,18 +47,28 @@ class _PantallaCamaraState extends State<PantallaCamara> {
   ResultadoPose? _resultado; // última pose detectada
   //double _anguloRodilla = 0; // verificación temporal de la geometría
 
-  final MotorEjercicio _motor = MotorEjercicio(recetaSentadilla);
+  //final MotorEjercicio _motor = MotorEjercicio(recetaSentadilla);
+  late final MotorEjercicio _motor; //(ahora se crea con la receta que llega de afuera, así que se inicializa en initState
   final ServicioVoz _voz = ServicioVoz(); //servicio de voz
 
   int _repeticiones = 0;
   double _anguloActual = 0;
   FaseMovimiento _fase = FaseMovimiento.arriba;
   List<ReglaForma> _errores = [];
+  double _segundos = 0;
+  bool _formaCorrecta = true;
 
+  //para guardar datos
+  final ServicioSesiones _servicioSesiones = ServicioSesiones();
+  final List<RepeticionCompletada> _repsCompletadas = [];
+  late DateTime _inicio;
+  bool _guardando = false;
 
   @override
   void initState() {
     super.initState();
+    _motor = MotorEjercicio(widget.receta);
+    _inicio = DateTime.now();
     _iniciarCamara();
     _voz.inicializar();
   }
@@ -107,31 +126,86 @@ class _PantallaCamaraState extends State<PantallaCamara> {
       if (resultado.poses.isNotEmpty) {
         final evaluacion = _motor.evaluar(resultado.poses.first);
         if (evaluacion != null) {
+          if (evaluacion.repCompletada != null) {
+            _repsCompletadas.add(evaluacion.repCompletada!);
+          }
+
           final repsAntes = _repeticiones;
           _repeticiones = evaluacion.repeticiones;
           _anguloActual = evaluacion.anguloPrincipal;
           _fase = evaluacion.fase;
           _errores = evaluacion.erroresActivos;
+
+          //nuevo
+          _segundos = evaluacion.segundosMantenidos;
+          _formaCorrecta = evaluacion.formaCorrecta;
+
           //logica de voz
           // Feedback por voz: prioriza el error más grave;
           // si no hay errores y se completó una rep, anuncia el número.
           if (_errores.isNotEmpty) {
-            final graves =
-                _errores.where((e) => e.severidad == Severidad.alta);
-            _voz.decir((graves.isNotEmpty ? graves.first : _errores.first).mensaje);
+            final graves = _errores.where((e) => e.severidad == Severidad.alta);
+            _voz.decir(
+              (graves.isNotEmpty ? graves.first : _errores.first).mensaje,
+            );
           } else if (_repeticiones > repsAntes) {
             _voz.decirNumero(_repeticiones);
           }
+        } else {
+          _errores = [];
+          _motor.pausar();
         }
       } else {
         _errores = [];
       }
       if (mounted) setState(() => _resultado = resultado);
-
     } catch (e) {
       debugPrint('Error procesando frame: $e');
     } finally {
       _procesando = false;
+    }
+  }
+
+  //metodos para reiniciar y finalizar sesion
+  void _reiniciar() {
+    _motor.reiniciar();
+    _voz.reiniciar();
+    _segundos = 0;
+    _repsCompletadas.clear();
+    _inicio = DateTime.now();
+    setState(() => _repeticiones = 0);
+  }
+
+  Future<void> _finalizar() async {
+    setState(() => _guardando = true);
+    _procesando = true; // frena el procesamiento de nuevos frames
+    try {
+      await _controlador?.stopImageStream();
+    } catch (_) {}
+
+    try {
+      await _servicioSesiones.guardarSesion(
+        ejercicioId: widget.receta.id,
+        iniciada: _inicio,
+        repsTotales: _repeticiones,
+        repsCorrectas: _motor.repsCorrectas,
+        repsIncorrectas: _motor.repsIncorrectas,
+        duracionSegundos: _segundos.round(), // relevante en la plancha
+        repeticiones: _repsCompletadas,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Sesión guardada ✓')));
+      Navigator.of(context).pop(); // vuelve al menú
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('No se pudo guardar: $e')));
+      _procesando = false;
+      setState(() => _guardando = false);
+      try {
+        await _controlador?.startImageStream(_procesarFrame); // reanuda
+      } catch (_) {}
     }
   }
 
@@ -146,16 +220,30 @@ class _PantallaCamaraState extends State<PantallaCamara> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(recetaSentadilla.nombre)),
+      appBar: AppBar(
+        title: Text(widget.receta.nombre),
+        actions: [
+          IconButton(
+            tooltip: 'Reiniciar',
+            icon: const Icon(Icons.refresh),
+            onPressed: _reiniciar,
+          ),
+        ],
+      ),
       body: _construirCuerpo(),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () {
-          _voz.reiniciar();
-          _motor.reiniciar();
-          setState(() => _repeticiones = 0);
-        },
-        icon: const Icon(Icons.refresh),
-        label: const Text('Reiniciar'),
+        onPressed: _guardando ? null : _finalizar,
+        icon: _guardando
+            ? const SizedBox(
+                height: 18,
+                width: 18,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Colors.white,
+                ),
+              )
+            : const Icon(Icons.check),
+        label: Text(_guardando ? 'Guardando...' : 'Finalizar'),
       ),
     );
   }
@@ -208,27 +296,55 @@ class _PantallaCamaraState extends State<PantallaCamara> {
               color: Colors.black54,
               borderRadius: BorderRadius.circular(12),
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Reps: $_repeticiones',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 28,
-                    fontWeight: FontWeight.bold,
+            child: widget.receta.tipo == TipoEjercicio.isometrico
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Tiempo: ${_segundos.toStringAsFixed(0)} s',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 28,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      Text(
+                        _formaCorrecta
+                            ? 'Postura correcta'
+                            : 'Corrige la postura',
+                        style: TextStyle(
+                          color: _formaCorrecta
+                              ? Colors.greenAccent
+                              : Colors.orangeAccent,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ],
+                  )
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Reps: $_repeticiones',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 28,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      Text(
+                        'Ángulo: ${_anguloActual.toStringAsFixed(0)}°  ·  '
+                        '${_fase == FaseMovimiento.abajo ? "ABAJO" : "ARRIBA"}',
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ],
                   ),
-                ),
-                Text(
-                  'Ángulo: ${_anguloActual.toStringAsFixed(0)}°  ·  '
-                  '${_fase == FaseMovimiento.abajo ? "ABAJO" : "ARRIBA"}',
-                  style: const TextStyle(color: Colors.white70, fontSize: 14),
-                ),
-              ],
-            ),
           ),
         ),
-        
+
         // Banner de errores de forma (abajo de la pantalla).
         if (_errores.isNotEmpty)
           Positioned(
@@ -243,8 +359,10 @@ class _PantallaCamaraState extends State<PantallaCamara> {
                     : Colors.orangeAccent;
                 return Container(
                   margin: const EdgeInsets.only(bottom: 8),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 10,
+                  ),
                   decoration: BoxDecoration(
                     color: color.withOpacity(0.9),
                     borderRadius: BorderRadius.circular(12),

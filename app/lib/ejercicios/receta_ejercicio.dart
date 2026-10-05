@@ -43,14 +43,14 @@ class RecetaEjercicio {
   final String id;
   final String nombre;
   final TipoEjercicio tipo;
-  final DeteccionRepeticion deteccionRepeticion;
+  final DeteccionRepeticion? deteccionRepeticion;
   final List<ReglaForma> reglasForma;
 
   const RecetaEjercicio({
     required this.id,
     required this.nombre,
     required this.tipo,
-    required this.deteccionRepeticion,
+    this.deteccionRepeticion,
     this.reglasForma = const [],
   });
 }
