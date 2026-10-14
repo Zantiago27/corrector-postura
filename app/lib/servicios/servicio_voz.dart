@@ -1,7 +1,8 @@
 import 'package:flutter_tts/flutter_tts.dart';
 
 /// Envuelve la síntesis de voz (Text-To-Speech).
-/// Evita repetir el mismo mensaje muchas veces seguidas.
+/// Evita repetir el mismo mensaje muchas veces seguidas y expone si está
+/// hablando (útil para pausar el reconocimiento de comandos mientras habla).
 class ServicioVoz {
   final FlutterTts _tts = FlutterTts();
 
@@ -9,12 +10,48 @@ class ServicioVoz {
   DateTime _ultimaVez = DateTime.fromMillisecondsSinceEpoch(0);
   final Duration _tiempoEspera = const Duration(seconds: 3);
 
-  /// Configura idioma y velocidad. Llamar una vez al inicio.
-  Future<void> inicializar() async {
-    await _tts.setLanguage('es-ES'); // cámbialo a 'es-MX' o 'es-US' si prefieres acento latino
-    await _tts.setSpeechRate(0.5);   // 0.5 = ritmo natural (1.0 es muy rápido)
-    await _tts.setPitch(1.0);
+  /// true mientras el TTS está reproduciendo audio.
+  bool _hablando = false;
+  bool get hablando => _hablando;
+
+  /// Callbacks opcionales para avisar cuándo empieza y termina de hablar.
+  /// El servicio de comandos los usa para no escucharse a sí mismo.
+  void Function()? alEmpezarHablar;
+  void Function()? alTerminarHablar;
+
+  /// Configura idioma, velocidad y tono. Llamar una vez al inicio.
+  /// [tono] y [velocidad] permiten personalizar la voz (ver pantalla de ajustes).
+  Future<void> inicializar({double tono = 1.0, double velocidad = 0.5}) async {
+    await _tts.setLanguage('es-ES'); // 'es-MX' / 'es-US' para acento latino
+    await _tts.setSpeechRate(velocidad); // 0.5 = ritmo natural
+    await _tts.setPitch(tono); // 0.5 grave – 2.0 agudo
     await _tts.setVolume(1.0);
+
+    // Hace que speak() complete recién cuando termina de hablar.
+    await _tts.awaitSpeakCompletion(true);
+
+    _tts.setStartHandler(() {
+      _hablando = true;
+      alEmpezarHablar?.call();
+    });
+    _tts.setCompletionHandler(() {
+      _hablando = false;
+      alTerminarHablar?.call();
+    });
+    _tts.setCancelHandler(() {
+      _hablando = false;
+      alTerminarHablar?.call();
+    });
+    _tts.setErrorHandler((_) {
+      _hablando = false;
+      alTerminarHablar?.call();
+    });
+  }
+
+  /// Cambia tono y velocidad en caliente (desde ajustes).
+  Future<void> configurar({double? tono, double? velocidad}) async {
+    if (tono != null) await _tts.setPitch(tono);
+    if (velocidad != null) await _tts.setSpeechRate(velocidad);
   }
 
   /// Dice el mensaje solo si es nuevo o si ya pasó el tiempo de espera.
@@ -22,15 +59,15 @@ class ServicioVoz {
     final ahora = DateTime.now();
     final esNuevo = mensaje != _ultimoMensaje;
     final yaPaso = ahora.difference(_ultimaVez) > _tiempoEspera;
-    if (!esNuevo && !yaPaso) return; // mismo mensaje reciente -> no repetir
+    if (!esNuevo && !yaPaso) return;
 
     _ultimoMensaje = mensaje;
     _ultimaVez = ahora;
-    await _tts.stop();     // corta lo que esté diciendo
+    await _tts.stop();
     await _tts.speak(mensaje);
   }
 
-  /// Anuncia un número de repetición (siempre, sin filtro de repetición).
+  /// Anuncia un número de repetición (sin filtro de repetición).
   Future<void> decirNumero(int n) async {
     await _tts.stop();
     await _tts.speak('$n');

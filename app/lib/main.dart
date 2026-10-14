@@ -15,6 +15,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'config/supabase_config.dart';
 import 'pantallas/portal_auth.dart';
 
+import 'config/tema.dart';
+
 Future<void> main() async {
   // Requerido para usar plugins (como la cámara) antes de arrancar la app.
   WidgetsFlutterBinding.ensureInitialized();
@@ -41,7 +43,8 @@ class MiApp extends StatelessWidget {
     return MaterialApp(
       title: 'Corrector de Postura',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(colorSchemeSeed: Colors.teal, useMaterial3: true),
+      //theme: ThemeData(colorSchemeSeed: Colors.teal, useMaterial3: true),
+      theme: construirTema(),
       // Para probar, cambia la receta del home a -> home: PantallaCamara(camaras: camaras, receta: recetaPlancha),
       //home: PantallaCamara(camaras: camaras, receta: recetaCurl),
       home: PortalAuth(camaras: camaras),

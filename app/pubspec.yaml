@@ -39,6 +39,9 @@ dependencies:
   permission_handler: ^13.0.2
   flutter_tts: ^4.2.5
   supabase_flutter: ^2.18.0
+  google_fonts: ^6.2.1
+  speech_to_text: ^7.5.0  #para comandos de voz
+  shared_preferences: ^2.5.6
 
 dev_dependencies:
   flutter_test:

@@ -6,7 +6,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 //import 'pantalla_camara.dart';
 //import 'pantalla_login.dart';
 import 'pantalla_menu.dart';
-import 'pantalla_login.dart';
+//import 'pantalla_login.dart';
+import 'pantalla_onboarding.dart';
 
 /// Escucha el estado de autenticación y decide:
 /// - con sesión  -> entra a la app
@@ -28,7 +29,8 @@ class PortalAuth extends StatelessWidget {
           //return PantallaCamara(camaras: camaras, receta: recetaSentadilla); -> antiguo
           return PantallaMenu(camaras: camaras);
         }
-        return const PantallaLogin();
+        //return const PantallaLogin();
+        return const PuertaEntrada();
       },
     );
   }
