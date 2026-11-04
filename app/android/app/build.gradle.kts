@@ -16,7 +16,8 @@ android {
 
     defaultConfig {
         applicationId = "com.corrector.corrector_postura"
-        minSdk = flutter.minSdkVersion          // <-- antes decía: flutter.minSdkVersion
+        //minSdk = flutter.minSdkVersion          // <-- antes decía: flutter.minSdkVersion
+        minSdk = 24  // mínimo exigido por wakelock_plus (ML Kit pide 23) -> REVISAR
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName

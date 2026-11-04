@@ -13,6 +13,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../config/tema.dart';
 import 'pantalla_login.dart';
+import 'silueta_puntos.dart';
 
 /// Clave en preferencias para no volver a mostrar el onboarding.
 const _kOnboardingVisto = 'onboarding_visto';
@@ -139,9 +140,17 @@ class PantallaOnboarding extends StatelessWidget {
                             color: const Color(0xFFD6CFC3),
                             style: BorderStyle.solid),
                       ),
-                      alignment: Alignment.center,
-                      child: const Icon(Icons.accessibility_new_rounded,
-                          size: 110, color: Colores.acento),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const SiluetaPuntos(size: 95),
+                          const SizedBox(height: 10),
+                          Text('DETECCIÓN DE POSE · 33 PUNTOS',
+                              style: Tipografia.manrope(10,
+                                  peso: FontWeight.w700,
+                                  color: const Color(0xFFA89F92))),
+                        ],
+                      ),
                     ),
                     const SizedBox(height: 28),
                     Text('Corrige tu técnica\nen tiempo real.',

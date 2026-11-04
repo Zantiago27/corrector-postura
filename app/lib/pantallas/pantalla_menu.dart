@@ -14,10 +14,13 @@ import '../ejercicios/receta_ejercicio.dart';
 import '../ejercicios/sentadilla.dart';
 import '../ejercicios/curl_biceps.dart';
 import '../ejercicios/plancha.dart';
+import '../ejercicios/flexiones.dart';
+import '../ejercicios/jumping_jacks.dart';
 import '../servicios/servicio_sesiones.dart';
 import '../servicios/modelos_sesion.dart';
-import 'pantalla_camara.dart';
+import 'pantalla_tutorial.dart';
 import 'pantalla_historial.dart';
+import 'pantalla_ajustes.dart';
 
 class PantallaMenu extends StatefulWidget {
   final List<CameraDescription> camaras;
@@ -32,7 +35,8 @@ class _PantallaMenuState extends State<PantallaMenu> {
 
   // Ejercicios disponibles. Agregar uno nuevo = una línea aquí.
   List<RecetaEjercicio> get _ejercicios =>
-      [recetaSentadilla, recetaCurl, recetaPlancha];
+            [recetaSentadilla, recetaFlexiones, recetaCurl, recetaPlancha,
+          recetaJumpingJacks];
 
   bool _cargandoStats = true;
   int _racha = 0;
@@ -95,6 +99,10 @@ class _PantallaMenuState extends State<PantallaMenu> {
         return 'Brazos';
       case 'plank':
         return 'Core';
+      case 'pushup':
+        return 'Pecho y brazos';
+      case 'jumping_jack':
+        return 'Cardio';
       default:
         return 'General';
     }
@@ -113,13 +121,25 @@ class _PantallaMenuState extends State<PantallaMenu> {
         return Icons.fitness_center_rounded;
       case 'plank':
         return Icons.airline_seat_flat_rounded;
+      case 'pushup':
+        return Icons.airline_seat_flat_angled_rounded;
+      case 'jumping_jack':
+        return Icons.sports_gymnastics_rounded;
       default:
         return Icons.sports_gymnastics_rounded;
     }
   }
 
   String get _nombreUsuario {
-    final correo = Supabase.instance.client.auth.currentUser?.email ?? '';
+    final usuario = Supabase.instance.client.auth.currentUser;
+    // 1) Nombre guardado al registrarse (metadatos del usuario).
+    final meta = usuario?.userMetadata?['nombre'];
+    if (meta is String && meta.trim().isNotEmpty) {
+      final n = meta.trim();
+      return n[0].toUpperCase() + n.substring(1);
+    }
+    // 2) Si no hay nombre, derivamos del correo.
+    final correo = usuario?.email ?? '';
     if (correo.isEmpty) return 'Atleta';
     final local = correo.split('@').first;
     if (local.isEmpty) return 'Atleta';
@@ -128,7 +148,7 @@ class _PantallaMenuState extends State<PantallaMenu> {
 
   void _abrirEjercicio(RecetaEjercicio receta) {
     Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => PantallaCamara(camaras: widget.camaras, receta: receta),
+      builder: (_) => PantallaTutorial(camaras: widget.camaras, receta: receta),
     ));
   }
 
@@ -136,6 +156,13 @@ class _PantallaMenuState extends State<PantallaMenu> {
     Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => const PantallaHistorial()),
     );
+  }
+
+  Future<void> _irAjustes() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const PantallaAjustes()),
+    );
+    if (mounted) setState(() {}); // por si cambió el nombre
   }
 
   @override
@@ -194,10 +221,12 @@ class _PantallaMenuState extends State<PantallaMenu> {
           offset: const Offset(0, 48),
           onSelected: (v) {
             if (v == 'historial') _irHistorial();
+            if (v == 'ajustes') _irAjustes();
             if (v == 'salir') Supabase.instance.client.auth.signOut();
           },
           itemBuilder: (_) => const [
             PopupMenuItem(value: 'historial', child: Text('Mi progreso')),
+            PopupMenuItem(value: 'ajustes', child: Text('Ajustes')),
             PopupMenuItem(value: 'salir', child: Text('Cerrar sesión')),
           ],
           child: Container(

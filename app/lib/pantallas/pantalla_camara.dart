@@ -1,23 +1,32 @@
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
+import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../config/tema.dart';
-import '../core/motor_ejercicio.dart';
-import '../ejercicios/receta_ejercicio.dart';
+import '../core/coach_entrenamiento.dart';
+import '../core/controlador_entrenamiento.dart';
 import '../ejercicios/instrucciones_ejercicio.dart';
+import '../ejercicios/receta_ejercicio.dart';
 import '../ml/detector_pose.dart';
-import '../servicios/servicio_voz.dart';
 import '../servicios/servicio_comandos.dart';
+import '../servicios/servicio_ajustes.dart';
 import '../servicios/servicio_sesiones.dart';
-import 'pintor_esqueleto.dart';
+import '../servicios/servicio_voz.dart';
+import 'figura_animada.dart';
 import 'pantalla_resumen.dart';
+import 'pintor_esqueleto.dart';
+import 'widgets_coaching.dart';
 
-/// Fase visual de la pantalla: primero el usuario se acomoda ("prepárate"),
-/// y al pulsar Empezar comienza el conteo ("entrenando").
-enum _FaseVista { preparando, entrenando }
-
+/// Pantalla de entrenamiento.
+///
+/// Se encarga de lo "físico": cámara, permisos, voz y dibujo. La lógica del
+/// entrenamiento (estados, conteo, coaching, datos de la serie) vive en
+/// ControladorEntrenamiento.
+///
+/// Fase D: flujo manos libres (inicio automático con cuenta regresiva y
+/// pausa automática), silueta guía y soporte de orientación horizontal.
 class PantallaCamara extends StatefulWidget {
   final List<CameraDescription> camaras;
   final RecetaEjercicio receta;
@@ -32,7 +41,9 @@ class PantallaCamara extends StatefulWidget {
   State<PantallaCamara> createState() => _PantallaCamaraState();
 }
 
-class _PantallaCamaraState extends State<PantallaCamara> {
+class _PantallaCamaraState extends State<PantallaCamara>
+    with WidgetsBindingObserver {
+  // --- Cámara ---
   CameraController? _controlador;
   CameraDescription? _camaraActiva;
   final DetectorPose _detectorPose = DetectorPose();
@@ -42,58 +53,50 @@ class _PantallaCamaraState extends State<PantallaCamara> {
   bool _cambiandoCamara = false;
   String? _error;
 
+  // Cada controlador nuevo recibe un número de "generación".
+  // Los frames que lleguen con un número viejo se descartan: así un frame
+  // de la cámara anterior nunca toca el estado ni la UI.
+  int _generacionCamara = 0;
+
+  // true si liberamos la cámara porque la app pasó a segundo plano.
+  bool _camaraLiberada = false;
+
   bool _procesando = false;
   ResultadoPose? _resultado;
 
-  late final MotorEjercicio _motor;
+  // --- Entrenamiento ---
+  late final ControladorEntrenamiento _entreno;
+
+  // --- Voz (TTS) ---
   final ServicioVoz _voz = ServicioVoz();
   bool _vozActiva = true;
 
-  // Comandos de voz (STT)
+  // --- Comandos de voz (STT) ---
   final ServicioComandos _comandos = ServicioComandos();
   bool _comandosActivos = false;
   bool _sttDisponible = false;
 
-  // Estado de la sesión en curso
-  int _repeticiones = 0;
-  double _anguloActual = 0;
-  FaseMovimiento _fase = FaseMovimiento.arriba;
-  List<ReglaForma> _errores = [];
-  double _segundos = 0;
-  bool _formaCorrecta = true;
-
-  // Fase visual / encuadre
-  _FaseVista _faseVista = _FaseVista.preparando;
-  bool _encuadreOk = false;
-  bool _mostrarTips = false; // reabrir tips durante el entrenamiento
-
-  // Guardado
+  // --- UI / guardado ---
+  bool _mostrarTips = false;
   final ServicioSesiones _servicioSesiones = ServicioSesiones();
-  final List<RepeticionCompletada> _repsCompletadas = [];
-  late DateTime _inicio;
   bool _guardando = false;
 
-  bool get _esIsometrico => widget.receta.tipo == TipoEjercicio.isometrico;
-
-  // Articulaciones que deben verse para considerar el cuerpo "encuadrado".
-  static const _requeridos = [
-    PoseLandmarkType.leftShoulder,
-    PoseLandmarkType.rightShoulder,
-    PoseLandmarkType.leftHip,
-    PoseLandmarkType.rightHip,
-    PoseLandmarkType.leftKnee,
-    PoseLandmarkType.rightKnee,
-    PoseLandmarkType.leftAnkle,
-    PoseLandmarkType.rightAnkle,
-  ];
+  bool get _entrenando => _entreno.entrenando;
+  bool get _esIsometrico => _entreno.esIsometrico;
+  GuiaEjercicio get _guia => guiaDe(widget.receta.id);
 
   @override
   void initState() {
     super.initState();
-    _motor = MotorEjercicio(widget.receta);
-    _inicio = DateTime.now();
+    WidgetsBinding.instance.addObserver(this);
+    WakelockPlus.enable(); // la pantalla no se apaga mientras entrenas
+    // En esta pantalla se permite girar el teléfono (ejercicios de suelo).
+    SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+
+    _entreno = ControladorEntrenamiento(widget.receta);
     _iniciarCamara();
-    _voz.inicializar();
+    _cargarAjustes();
+    _comandos.alFallarEnDispositivo = _alFallarComandosEnDispositivo;
     // Mientras el entrenador habla, pausamos la escucha para no oírnos a
     // nosotros mismos; al terminar, reanudamos.
     _voz.alEmpezarHablar = () => _comandos.pausar();
@@ -103,16 +106,45 @@ class _PantallaCamaraState extends State<PantallaCamara> {
     _initComandos();
   }
 
+  // ===========================================================================
+  // COMANDOS DE VOZ
+  // ===========================================================================
+
   Future<void> _initComandos() async {
     _sttDisponible = await _comandos.inicializar();
     if (mounted) setState(() {});
   }
 
+  /// Aplica las preferencias guardadas (voz y privacidad del micrófono).
+  Future<void> _cargarAjustes() async {
+    final a = await ServicioAjustes.cargar();
+    await _voz.inicializar(
+        tono: a.tono, velocidad: a.velocidad, idioma: a.idiomaVoz);
+    _comandos
+      ..soloDispositivo = a.reconocimientoSoloDispositivo
+      ..localeId = a.idiomaReconocimiento;
+    if (mounted) setState(() => _vozActiva = a.vozActiva);
+  }
+
+  /// El teléfono no puede reconocer voz sin internet: se apagan los comandos.
+  void _alFallarComandosEnDispositivo() {
+    if (!mounted) return;
+    setState(() => _comandosActivos = false);
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      content: Text('Tu teléfono no reconoce voz sin internet. '
+          'Puedes permitirlo en Ajustes > Privacidad.'),
+      duration: Duration(seconds: 5),
+    ));
+  }
+
   /// Activa/desactiva los comandos de voz.
   Future<void> _toggleComandos() async {
     if (!_sttDisponible) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('El reconocimiento de voz no está disponible')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('El reconocimiento de voz no está disponible'),
+        ),
+      );
       return;
     }
     if (_comandosActivos) {
@@ -128,19 +160,29 @@ class _PantallaCamaraState extends State<PantallaCamara> {
   /// Ajusta las palabras clave que se escuchan según la fase actual.
   Future<void> _escucharFaseActual() async {
     if (!_comandosActivos) return;
-    if (_faseVista == _FaseVista.preparando) {
+    if (!_entrenando) {
       await _comandos.escuchar(
         comandos: const [
-          'empezar', 'empezamos', 'inicio', 'iniciar', 'vamos', 'comenzar'
+          'empezar',
+          'empezamos',
+          'inicio',
+          'iniciar',
+          'vamos',
+          'comenzar',
         ],
         alDetectar: (_) {
-          if (_encuadreOk && _faseVista == _FaseVista.preparando) _empezar();
+          if (_entreno.encuadreOk && !_entrenando) _empezar();
         },
       );
     } else {
       await _comandos.escuchar(
         comandos: const [
-          'fin', 'finalizar', 'finalizo', 'terminar', 'termina', 'terminamos'
+          'fin',
+          'finalizar',
+          'finalizo',
+          'terminar',
+          'termina',
+          'terminamos',
         ],
         alDetectar: (_) {
           if (!_guardando) _finalizar();
@@ -149,7 +191,9 @@ class _PantallaCamaraState extends State<PantallaCamara> {
     }
   }
 
-  // --- Cámara ---
+  // ===========================================================================
+  // CÁMARA (Fase A: sin cambios)
+  // ===========================================================================
 
   Future<void> _iniciarCamara() async {
     final estado = await Permission.camera.request();
@@ -170,9 +214,10 @@ class _PantallaCamaraState extends State<PantallaCamara> {
   }
 
   /// Crea (o recrea) el controlador para una cámara concreta y arranca el
-  /// stream. Se reutiliza al cambiar de cámara.
+  /// stream. Se reutiliza al cambiar de cámara y al volver de segundo plano.
   Future<void> _crearControlador(CameraDescription camara) async {
     _camaraActiva = camara;
+    final generacion = ++_generacionCamara;
     final controlador = CameraController(
       camara,
       ResolutionPreset.medium,
@@ -181,21 +226,47 @@ class _PantallaCamaraState extends State<PantallaCamara> {
     );
     try {
       await controlador.initialize();
-      if (!mounted) return;
-      await controlador.startImageStream(_procesarFrame);
+      // Si mientras inicializaba se cerró la pantalla o se pidió otra
+      // cámara, este controlador ya no sirve: lo liberamos.
+      if (!mounted || generacion != _generacionCamara) {
+        await _liberarControlador(controlador);
+        return;
+      }
+      await _arrancarStream(controlador, generacion);
       setState(() {
         _controlador = controlador;
         _inicializando = false;
         _cambiandoCamara = false;
-        _procesando = false;
       });
     } catch (e) {
+      await _liberarControlador(controlador);
+      if (!mounted) return;
       setState(() {
         _error = 'No se pudo iniciar la cámara: $e';
         _inicializando = false;
         _cambiandoCamara = false;
       });
     }
+  }
+
+  /// Arranca el stream de imágenes "marcado" con su generación.
+  Future<void> _arrancarStream(CameraController controlador, int generacion) {
+    return controlador.startImageStream(
+      (imagen) => _procesarFrame(imagen, generacion),
+    );
+  }
+
+  /// Detiene el stream y libera un controlador sin lanzar errores.
+  Future<void> _liberarControlador(CameraController? controlador) async {
+    if (controlador == null) return;
+    try {
+      if (controlador.value.isStreamingImages) {
+        await controlador.stopImageStream();
+      }
+    } catch (_) {}
+    try {
+      await controlador.dispose();
+    } catch (_) {}
   }
 
   /// Alterna entre cámara frontal y trasera (si el equipo tiene ambas).
@@ -211,74 +282,80 @@ class _PantallaCamaraState extends State<PantallaCamara> {
       );
       return;
     }
-    setState(() => _cambiandoCamara = true);
-    _procesando = true; // frena el procesamiento mientras cambiamos
-    try {
-      await _controlador?.stopImageStream();
-    } catch (_) {}
-    await _controlador?.dispose();
-    _controlador = null;
+
+    // 1) Sacamos el controlador de la UI ANTES de liberarlo: así
+    //    CameraPreview nunca se dibuja con un controlador destruido.
+    final anterior = _controlador;
+    _generacionCamara++; // invalida los frames en vuelo de la cámara vieja
+    setState(() {
+      _cambiandoCamara = true;
+      _controlador = null;
+      _resultado = null; // el esqueleto viejo tenía otra rotación/espejo
+    });
+    if (_entrenando) _entreno.pausar();
+
+    // 2) Liberamos la cámara vieja y 3) creamos la nueva.
+    await _liberarControlador(anterior);
+    if (!mounted) return;
     await _crearControlador(nueva.first);
   }
 
-  // --- Procesamiento de frames ---
+  /// Libera la cámara al pasar a segundo plano y la recupera al volver.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState estado) {
+    if (estado == AppLifecycleState.paused) {
+      final actual = _controlador;
+      if (actual == null) return;
+      _camaraLiberada = true;
+      _generacionCamara++;
+      setState(() {
+        _controlador = null;
+        _resultado = null;
+      });
+      if (_entrenando) _entreno.pausar();
+      if (_comandosActivos) _comandos.pausar();
+      _voz.callar();
+      _liberarControlador(actual);
+    } else if (estado == AppLifecycleState.resumed) {
+      WakelockPlus.enable(); // el sistema pudo haberlo soltado
+      if (_camaraLiberada && _camaraActiva != null && !_guardando) {
+        _camaraLiberada = false;
+        _crearControlador(_camaraActiva!);
+        if (_comandosActivos) _comandos.reanudar();
+      }
+    }
+  }
 
-  Future<void> _procesarFrame(CameraImage imagen) async {
-    if (_procesando) return;
+  // ===========================================================================
+  // PROCESAMIENTO DE FRAMES
+  // ===========================================================================
+
+  Future<void> _procesarFrame(CameraImage imagen, int generacion) async {
+    // Descarta frames de una cámara que ya no está activa.
+    if (_procesando || generacion != _generacionCamara) return;
+    final controlador = _controlador;
+    final camara = _camaraActiva;
+    if (controlador == null || camara == null) return;
     _procesando = true;
     try {
       final resultado = await _detectorPose.procesarFrame(
         imagen: imagen,
-        controlador: _controlador!,
-        camara: _camaraActiva!,
+        controlador: controlador,
+        camara: camara,
       );
+      // Mientras ML Kit procesaba, pudo cambiar la cámara o cerrarse la
+      // pantalla: en ese caso este resultado ya no vale.
+      if (!mounted || generacion != _generacionCamara) return;
 
-      if (_faseVista == _FaseVista.preparando) {
-        // Solo verificamos encuadre; el motor NO cuenta todavía.
-        final ok = resultado.poses.isNotEmpty &&
-            _cuerpoEncuadrado(resultado.poses.first);
-        if (ok && !_encuadreOk && _vozActiva) {
-          _voz.decir('Listo, ya estás en cuadro. Puedes empezar.');
-        }
-        _encuadreOk = ok;
-        _errores = [];
-      } else {
-        // Entrenando: lógica del motor (conteo + reglas + voz).
-        if (resultado.poses.isNotEmpty) {
-          final evaluacion = _motor.evaluar(resultado.poses.first);
-          if (evaluacion != null) {
-            if (evaluacion.repCompletada != null) {
-              _repsCompletadas.add(evaluacion.repCompletada!);
-            }
-            final repsAntes = _repeticiones;
-            _repeticiones = evaluacion.repeticiones;
-            _anguloActual = evaluacion.anguloPrincipal;
-            _fase = evaluacion.fase;
-            _errores = evaluacion.erroresActivos;
-            _segundos = evaluacion.segundosMantenidos;
-            _formaCorrecta = evaluacion.formaCorrecta;
+      // Toda la lógica (encuadre, cuenta regresiva, conteo, coaching,
+      // pausa automática) está en el controlador.
+      final estabaEntrenando = _entrenando;
+      final pose = resultado.poses.isEmpty ? null : resultado.poses.first;
+      final anuncio = _entreno.procesar(pose, DateTime.now());
+      _anunciar(anuncio);
+      if (!estabaEntrenando && _entrenando) _alEmpezarEntrenamiento();
 
-            if (_vozActiva) {
-              if (_errores.isNotEmpty) {
-                final graves =
-                    _errores.where((e) => e.severidad == Severidad.alta);
-                _voz.decir(
-                  (graves.isNotEmpty ? graves.first : _errores.first).mensaje,
-                );
-              } else if (_repeticiones > repsAntes) {
-                _voz.decirNumero(_repeticiones);
-              }
-            }
-          } else {
-            _errores = [];
-            _motor.pausar();
-          }
-        } else {
-          _errores = [];
-        }
-      }
-
-      if (mounted) setState(() => _resultado = resultado);
+      setState(() => _resultado = resultado);
     } catch (e) {
       debugPrint('Error procesando frame: $e');
     } finally {
@@ -286,66 +363,61 @@ class _PantallaCamaraState extends State<PantallaCamara> {
     }
   }
 
-  /// ¿Se ven las articulaciones clave con suficiente confianza?
-  bool _cuerpoEncuadrado(Pose pose) {
-    for (final t in _requeridos) {
-      final lm = pose.landmarks[t];
-      if (lm == null || lm.likelihood < 0.5) return false;
-    }
-    return true;
+  /// Dice en voz alta lo que decidió el controlador (si la voz está activa).
+  void _anunciar(Anuncio? anuncio) {
+    if (anuncio == null || !_vozActiva) return;
+    _voz.decirCoach(anuncio.texto, interrumpir: anuncio.prioritario);
   }
 
-  // --- Acciones ---
+  // ===========================================================================
+  // ACCIONES
+  // ===========================================================================
 
+  /// Botón "Empezar" o comando de voz: empieza ya, sin cuenta regresiva.
   void _empezar() {
-    if (!_encuadreOk) return;
-    _motor.reiniciar();
+    if (!_entreno.empezar(DateTime.now())) return;
+    _alEmpezarEntrenamiento();
+    _anunciar(const Anuncio('¡Vamos!', prioritario: true));
+    setState(() {});
+  }
+
+  /// Se llama al pasar a "Entrenando" (por botón, voz o cuenta regresiva).
+  void _alEmpezarEntrenamiento() {
     _voz.reiniciar();
-    _repsCompletadas.clear();
-    _repeticiones = 0;
-    _segundos = 0;
-    _inicio = DateTime.now();
-    setState(() {
-      _faseVista = _FaseVista.entrenando;
-      _mostrarTips = false;
-    });
-    if (_vozActiva) _voz.decir('Comencemos');
+    _mostrarTips = false;
     // Cambia las palabras clave: ahora escuchamos "finalizar".
     _escucharFaseActual();
   }
 
   void _reiniciar() {
-    _motor.reiniciar();
+    _entreno.reiniciarSerie(DateTime.now());
     _voz.reiniciar();
-    _segundos = 0;
-    _repsCompletadas.clear();
-    _inicio = DateTime.now();
-    setState(() => _repeticiones = 0);
+    setState(() {});
   }
 
   void _toggleVoz() {
     setState(() => _vozActiva = !_vozActiva);
-    if (!_vozActiva) _voz.reiniciar(); // corta lo que esté diciendo
+    if (!_vozActiva) _voz.callar(); // corta lo que esté diciendo
   }
 
   Future<void> _finalizar() async {
     setState(() => _guardando = true);
     _procesando = true;
+    _voz.callar();
     try {
       await _controlador?.stopImageStream();
     } catch (_) {}
 
+    final duracion = _entreno.duracionSegundos(DateTime.now());
     try {
-      await _servicioSesiones.guardarSesion(
+      final resultado = await _servicioSesiones.guardarSesion(
         ejercicioId: widget.receta.id,
-        iniciada: _inicio,
-        repsTotales: _repeticiones,
-        repsCorrectas: _motor.repsCorrectas,
-        repsIncorrectas: _motor.repsIncorrectas,
-        duracionSegundos: _esIsometrico
-            ? _segundos.round()
-            : DateTime.now().difference(_inicio).inSeconds,
-        repeticiones: _repsCompletadas,
+        iniciada: _entreno.inicio,
+        repsTotales: _entreno.repsTotales,
+        repsCorrectas: _entreno.repsCorrectas,
+        repsIncorrectas: _entreno.repsIncorrectas,
+        duracionSegundos: duracion,
+        repeticiones: _entreno.reps,
       );
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
@@ -353,86 +425,121 @@ class _PantallaCamaraState extends State<PantallaCamara> {
           builder: (_) => PantallaResumen(
             camaras: widget.camaras,
             receta: widget.receta,
-            repsTotales: _repeticiones,
-            repsCorrectas: _motor.repsCorrectas,
-            repsIncorrectas: _motor.repsIncorrectas,
-            duracionSegundos: _esIsometrico
-                ? _segundos.round()
-                : DateTime.now().difference(_inicio).inSeconds,
-            repeticiones: _repsCompletadas,
+            repsTotales: _entreno.repsTotales,
+            repsCorrectas: _entreno.repsCorrectas,
+            repsIncorrectas: _entreno.repsIncorrectas,
+            duracionSegundos: duracion,
+            repeticiones: _entreno.reps,
+            pendienteDeSubir: resultado == ResultadoGuardado.pendiente,
           ),
         ),
       );
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('No se pudo guardar: $e')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('No se pudo guardar: $e')));
       _procesando = false;
       setState(() => _guardando = false);
       try {
-        await _controlador?.startImageStream(_procesarFrame);
+        final actual = _controlador;
+        if (actual != null) await _arrancarStream(actual, _generacionCamara);
       } catch (_) {}
     }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    WakelockPlus.disable(); // fuera de esta pantalla, comportamiento normal
+    // El resto de la app está diseñado en vertical.
+    SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+    _generacionCamara++; // ningún frame en vuelo debe tocar el estado
+    _liberarControlador(_controlador);
     _detectorPose.cerrar();
     _voz.cerrar();
     _comandos.cerrar();
-    _controlador?.dispose();
     super.dispose();
   }
 
-  // --- UI ---
+  // ===========================================================================
+  // UI
+  // ===========================================================================
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colores.oscuro,
-      body: _contenido(),
-    );
+    return Scaffold(backgroundColor: Colores.oscuro, body: _contenido());
   }
 
   Widget _contenido() {
     if (_inicializando) {
-      return const Center(child: CircularProgressIndicator(color: Colores.acento));
+      return const Center(
+        child: CircularProgressIndicator(color: Colores.acento),
+      );
     }
     if (!_permisoConcedido) return _vistaPermiso();
     if (_error != null) return _vistaError();
 
+    final ahora = DateTime.now();
+    final horizontal =
+        MediaQuery.orientationOf(context) == Orientation.landscape;
+    final numeroCuenta = _entreno.numeroCuenta(ahora);
+
     return Stack(
+      // Todas las capas son Positioned: con "expand" el Stack siempre ocupa
+      // toda la pantalla (si no, un hijo de tamaño 0 lo encogía a 0x0).
+      fit: StackFit.expand,
       children: [
-        _preview(),
+        _preview(ahora),
+        if (!_entrenando) _siluetaGuia(horizontal),
+        if (_entrenando)
+          Positioned.fill(
+            child: DestelloVeredicto(
+              idVeredicto: _entreno.coach.idVeredicto,
+              correcto: _entreno.coach.ultimoVeredictoCorrecto ?? true,
+            ),
+          ),
+        if (numeroCuenta != null) _cuentaRegresiva(numeroCuenta),
+        if (_entreno.pausado) _velaPausa(),
         _barraSuperior(),
-        if (_faseVista == _FaseVista.entrenando) _hudContador(),
-        _panelInferior(),
+        if (!_entrenando && _sugerirGirar(horizontal))
+          _avisoOrientacion(horizontal),
+        if (_entrenando && !_entreno.pausado) _hudContador(horizontal),
+        _panelInferior(ahora, horizontal),
         if (_cambiandoCamara)
           const Positioned.fill(
             child: ColoredBox(
               color: Colors.black38,
               child: Center(
-                  child: CircularProgressIndicator(color: Colores.acento)),
+                child: CircularProgressIndicator(color: Colores.acento),
+              ),
             ),
           ),
       ],
     );
   }
 
-  Widget _preview() {
+  Widget _preview(DateTime ahora) {
+    final controlador = _controlador;
+    final resultado = _resultado;
+    // Durante el cambio de cámara (o en segundo plano) no hay controlador:
+    // mostramos fondo oscuro; el spinner de _cambiandoCamara va encima.
+    if (controlador == null || !controlador.value.isInitialized) {
+      return const Positioned.fill(child: ColoredBox(color: Colores.oscuro));
+    }
     return Positioned.fill(
       child: Center(
         child: CameraPreview(
-          _controlador!,
-          child: _resultado == null
+          controlador,
+          child: resultado == null
               ? const SizedBox.shrink()
               : CustomPaint(
                   painter: PintorEsqueleto(
-                    poses: _resultado!.poses,
-                    tamanoImagen: _resultado!.tamanoImagen,
-                    rotacion: _resultado!.rotacion,
+                    poses: resultado.poses,
+                    tamanoImagen: resultado.tamanoImagen,
+                    rotacion: resultado.rotacion,
                     lente: _camaraActiva!.lensDirection,
-                    formaCorrecta: _errores.isEmpty && _formaCorrecta,
+                    formaCorrecta: _entreno.formaCorrecta(ahora),
+                    articulacionesResaltadas: _entreno.resaltadas(ahora),
                   ),
                 ),
         ),
@@ -440,7 +547,143 @@ class _PantallaCamaraState extends State<PantallaCamara> {
     );
   }
 
-  // Barra superior: volver · nombre · (reiniciar) · cambiar cámara · voz
+  /// Silueta semitransparente en la posición inicial: muestra DÓNDE y CÓMO
+  /// ponerse. Se desvanece al quedar encuadrado.
+  Widget _siluetaGuia(bool horizontal) {
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: SafeArea(
+          child: Padding(
+            // Deja libre la barra superior y el panel inferior.
+            padding: horizontal
+                ? const EdgeInsets.fromLTRB(24, 56, 420, 16)
+                : const EdgeInsets.fromLTRB(24, 64, 24, 250),
+            child: AnimatedOpacity(
+              duration: const Duration(milliseconds: 400),
+              opacity: _entreno.encuadreOk ? 0 : 0.55,
+              child: FiguraEstatica(
+                pose: _guia.poseInicial,
+                color: Colors.white,
+                colorPuntos: Colores.acento,
+                grosor: 0.025,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Número grande de la cuenta regresiva.
+  Widget _cuentaRegresiva(int numero) {
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: Center(
+          child: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 250),
+            transitionBuilder: (child, a) =>
+                ScaleTransition(scale: a, child: child),
+            child: Container(
+              key: ValueKey(numero),
+              width: 150,
+              height: 150,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: Colores.oscuro.withValues(alpha: 0.75),
+                shape: BoxShape.circle,
+                border: Border.all(color: Colores.acento, width: 4),
+              ),
+              child: Text(
+                '$numero',
+                style: Tipografia.sora(
+                  80,
+                  peso: FontWeight.w800,
+                  color: Colors.white,
+                  altura: 1,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Velo de pausa automática.
+  Widget _velaPausa() {
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: ColoredBox(
+          color: Colors.black.withValues(alpha: 0.55),
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.pause_circle_filled_rounded,
+                    color: Colors.white, size: 64),
+                const SizedBox(height: 12),
+                Text('En pausa',
+                    style: Tipografia.sora(26,
+                        peso: FontWeight.w800, color: Colors.white)),
+                const SizedBox(height: 6),
+                Text('Vuelve al cuadro para continuar',
+                    style: Tipografia.manrope(15,
+                        peso: FontWeight.w600,
+                        color: Colors.white.withValues(alpha: 0.8))),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Sugerencia (no obligatoria) si la orientación del teléfono no es la
+  /// que mejor funciona para este ejercicio.
+  bool _sugerirGirar(bool horizontal) =>
+      (widget.receta.orientacion == OrientacionSugerida.horizontal) !=
+      horizontal;
+
+  Widget _avisoOrientacion(bool horizontal) {
+    final sugiereHorizontal =
+        widget.receta.orientacion == OrientacionSugerida.horizontal;
+    return Positioned(
+      top: 0,
+      left: 0,
+      right: 0,
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.only(top: 60),
+          child: Center(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colores.oscuro.withValues(alpha: 0.85),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.screen_rotation_rounded,
+                      color: Colores.acento, size: 18),
+                  const SizedBox(width: 8),
+                  Text(
+                    sugiereHorizontal
+                        ? 'Tip: gira el teléfono en horizontal'
+                        : 'Tip: este ejercicio va mejor en vertical',
+                    style: Tipografia.manrope(13,
+                        peso: FontWeight.w700, color: Colors.white),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // Barra superior: volver · nombre · (reiniciar) · micrófono · cámara · voz
   Widget _barraSuperior() {
     return Positioned(
       top: 0,
@@ -451,20 +694,31 @@ class _PantallaCamaraState extends State<PantallaCamara> {
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
           child: Row(
             children: [
-              _botonCircular(Icons.close_rounded, () => Navigator.of(context).pop()),
-              const Spacer(),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.14),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Text(widget.receta.nombre,
-                    style: Tipografia.sora(14,
-                        peso: FontWeight.w700, color: Colors.white)),
+              _botonCircular(
+                Icons.close_rounded,
+                () => Navigator.of(context).pop(),
               ),
               const Spacer(),
-              if (_faseVista == _FaseVista.entrenando)
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 8,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  widget.receta.nombre,
+                  style: Tipografia.sora(
+                    14,
+                    peso: FontWeight.w700,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+              const Spacer(),
+              if (_entrenando)
                 _botonCircular(Icons.refresh_rounded, _reiniciar),
               if (_sttDisponible)
                 _botonCircular(
@@ -485,7 +739,11 @@ class _PantallaCamaraState extends State<PantallaCamara> {
     );
   }
 
-  Widget _botonCircular(IconData icono, VoidCallback onTap, {bool activo = false}) {
+  Widget _botonCircular(
+    IconData icono,
+    VoidCallback onTap, {
+    bool activo = false,
+  }) {
     return Padding(
       padding: const EdgeInsets.only(left: 8),
       child: InkWell(
@@ -497,7 +755,7 @@ class _PantallaCamaraState extends State<PantallaCamara> {
           decoration: BoxDecoration(
             color: activo
                 ? Colores.acento
-                : Colors.white.withOpacity(0.14),
+                : Colors.white.withValues(alpha: 0.14),
             borderRadius: BorderRadius.circular(12),
           ),
           child: Icon(icono, color: Colors.white, size: 20),
@@ -506,45 +764,61 @@ class _PantallaCamaraState extends State<PantallaCamara> {
     );
   }
 
-  // Contador grande (solo entrenando)
-  Widget _hudContador() {
+  /// Contador grande. El número principal son las reps CORRECTAS: solo
+  /// "vale" la rep bien hecha. Las que hay que corregir van aparte, en pequeño.
+  /// En horizontal se coloca arriba a la izquierda y más compacto.
+  Widget _hudContador(bool horizontal) {
+    final aCorregir = _entreno.repsIncorrectas;
+    final contenido = Column(
+      crossAxisAlignment:
+          horizontal ? CrossAxisAlignment.start : CrossAxisAlignment.center,
+      children: [
+        Text(
+          _esIsometrico ? 'TIEMPO EN POSICIÓN' : 'REPS CORRECTAS',
+          style: Tipografia.manrope(
+            12,
+            peso: FontWeight.w800,
+            color: Colors.white.withValues(alpha: 0.55),
+          ),
+        ),
+        SizedBox(
+          height: horizontal ? 64 : 92,
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Text(
+              _esIsometrico
+                  ? '${_entreno.segundos.toStringAsFixed(0)}s'
+                  : '${_entreno.repsCorrectas}',
+              style: Tipografia.sora(
+                88,
+                peso: FontWeight.w800,
+                color: Colors.white,
+                altura: 1,
+              ),
+            ),
+          ),
+        ),
+        if (!_esIsometrico) ...[
+          const SizedBox(height: 6),
+          TiraRepeticiones(veredictos: _entreno.coach.veredictos),
+          if (aCorregir > 0) ...[
+            const SizedBox(height: 8),
+            _pill('$aCorregir a corregir', Colores.acento),
+          ],
+        ],
+      ],
+    );
+
     return Positioned(
       top: 0,
       left: 0,
-      right: 0,
+      right: horizontal ? null : 0,
       child: SafeArea(
         child: Padding(
-          padding: const EdgeInsets.only(top: 66),
-          child: Column(
-            children: [
-              Text(_esIsometrico ? 'TIEMPO' : 'REPETICIONES',
-                  style: Tipografia.manrope(12,
-                      peso: FontWeight.w800,
-                      color: Colors.white.withOpacity(0.55))),
-              SizedBox(
-                height: 92,
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: Text(
-                    _esIsometrico
-                        ? '${_segundos.toStringAsFixed(0)}s'
-                        : '$_repeticiones',
-                    style: Tipografia.sora(88,
-                        peso: FontWeight.w800, color: Colors.white, altura: 1),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 6),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  _pill('${_motor.repsCorrectas} correctas', Colores.ok),
-                  const SizedBox(width: 10),
-                  _pill('${_motor.repsIncorrectas} a corregir', Colores.acento),
-                ],
-              ),
-            ],
-          ),
+          padding: horizontal
+              ? const EdgeInsets.only(top: 60, left: 20)
+              : const EdgeInsets.only(top: 66),
+          child: contenido,
         ),
       ),
     );
@@ -554,90 +828,24 @@ class _PantallaCamaraState extends State<PantallaCamara> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.12),
+        color: Colors.white.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(20),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(color: punto, shape: BoxShape.circle)),
-          const SizedBox(width: 6),
-          Text(texto,
-              style: Tipografia.manrope(13,
-                  peso: FontWeight.w700, color: Colors.white)),
-        ],
-      ),
-    );
-  }
-
-  // Panel inferior: cambia según la fase.
-  Widget _panelInferior() {
-    return Positioned(
-      left: 0,
-      right: 0,
-      bottom: 0,
-      child: SafeArea(
-        top: false,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-          child: _faseVista == _FaseVista.preparando
-              ? _controlesPreparando()
-              : _controlesEntrenando(),
-        ),
-      ),
-    );
-  }
-
-  // --- Fase Prepárate ---
-  Widget _controlesPreparando() {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        _bannerEncuadre(),
-        const SizedBox(height: 12),
-        _tarjetaTips(),
-        const SizedBox(height: 14),
-        FilledButton(
-          onPressed: _encuadreOk ? _empezar : null,
-          style: FilledButton.styleFrom(
-            backgroundColor: _encuadreOk ? Colores.acento : const Color(0xFF3A352F),
-            foregroundColor:
-                _encuadreOk ? Colores.sobreAcento : Colors.white54,
-            minimumSize: const Size.fromHeight(Medidas.alturaBoton),
-            shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(Medidas.radioBoton)),
+            width: 8,
+            height: 8,
+            decoration: BoxDecoration(color: punto, shape: BoxShape.circle),
           ),
-          child: Text(_encuadreOk ? 'Empezar' : 'Acomódate para empezar'),
-        ),
-      ],
-    );
-  }
-
-  Widget _bannerEncuadre() {
-    final ok = _encuadreOk;
-    final color = ok ? Colores.ok : Colores.acento;
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.92),
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: Row(
-        children: [
-          Icon(ok ? Icons.check_circle_rounded : Icons.center_focus_weak_rounded,
-              color: Colors.white, size: 22),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              ok
-                  ? 'Perfecto, se te ve completo'
-                  : 'Acomódate: que se vea todo tu cuerpo',
-              style: Tipografia.manrope(14,
-                  peso: FontWeight.w700, color: Colors.white),
+          const SizedBox(width: 6),
+          Text(
+            texto,
+            style: Tipografia.manrope(
+              13,
+              peso: FontWeight.w700,
+              color: Colors.white,
             ),
           ),
         ],
@@ -645,70 +853,205 @@ class _PantallaCamaraState extends State<PantallaCamara> {
     );
   }
 
+  /// Panel inferior: abajo a lo ancho (vertical) o abajo a la derecha
+  /// (horizontal, para no tapar el cuerpo).
+  Widget _panelInferior(DateTime ahora, bool horizontal) {
+    final contenido = _entrenando
+        ? _controlesEntrenando(ahora, horizontal)
+        : _controlesPreparando(ahora, horizontal);
+    return Positioned(
+      left: horizontal ? null : 0,
+      right: 0,
+      bottom: 0,
+      width: horizontal ? 400 : null,
+      child: SafeArea(
+        top: false,
+        left: !horizontal,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+          child: contenido,
+        ),
+      ),
+    );
+  }
+
+  // --- Fase Prepárate (incluye la cuenta regresiva) ---
+  Widget _controlesPreparando(DateTime ahora, bool horizontal) {
+    final ok = _entreno.encuadreOk;
+    final enCuenta = _entreno.enCuentaRegresiva;
+    // En horizontal hay poca altura: los tips se abren solo a petición.
+    final verTips = horizontal ? _mostrarTips : true;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _bannerPreparacion(ahora),
+        if (verTips) ...[
+          const SizedBox(height: 12),
+          _tarjetaTips(),
+        ],
+        if (horizontal) _botonTips(),
+        const SizedBox(height: 12),
+        FilledButton(
+          onPressed: ok ? _empezar : null,
+          style: FilledButton.styleFrom(
+            backgroundColor: ok ? Colores.acento : const Color(0xFF3A352F),
+            foregroundColor: ok ? Colores.sobreAcento : Colors.white54,
+            minimumSize: const Size.fromHeight(Medidas.alturaBoton),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(Medidas.radioBoton),
+            ),
+          ),
+          child: Text(enCuenta
+              ? 'Empezar ya'
+              : (ok ? 'Empezar' : 'Colócate como la silueta')),
+        ),
+      ],
+    );
+  }
+
+  /// Banner de "Prepárate": guía -> quédate quieto (con progreso) -> cuenta.
+  Widget _bannerPreparacion(DateTime ahora) {
+    final ok = _entreno.encuadreOk;
+    final enCuenta = _entreno.enCuentaRegresiva;
+    final progreso = _entreno.progresoAutoInicio(ahora);
+
+    final String texto;
+    final IconData icono;
+    if (enCuenta) {
+      texto = '¡Prepárate! Empezamos…';
+      icono = Icons.timer_rounded;
+    } else if (ok) {
+      texto = '¡Perfecto! Quédate quieto un momento';
+      icono = Icons.check_circle_rounded;
+    } else {
+      texto = widget.receta.vista == VistaCamara.lateral
+          ? 'Ponte de perfil, como la silueta'
+          : 'Ponte de frente, como la silueta';
+      icono = Icons.center_focus_weak_rounded;
+    }
+    final fondo = ok ? Colores.okFuerte : Colores.acento;
+    final colorTexto = ok ? Colors.white : Colores.sobreAcento;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+      decoration: BoxDecoration(
+        color: fondo,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Icon(icono, color: colorTexto, size: 22),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  texto,
+                  style: Tipografia.manrope(
+                    14,
+                    peso: FontWeight.w700,
+                    color: colorTexto,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (ok && !enCuenta) ...[
+            const SizedBox(height: 10),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                value: progreso,
+                minHeight: 5,
+                color: Colors.white,
+                backgroundColor: Colors.white.withValues(alpha: 0.3),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _botonTips() {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: TextButton.icon(
+        onPressed: () => setState(() => _mostrarTips = !_mostrarTips),
+        style: TextButton.styleFrom(foregroundColor: Colors.white70),
+        icon: const Icon(Icons.help_outline_rounded, size: 18),
+        label: Text(
+          _mostrarTips ? 'Ocultar' : '¿Cómo me coloco?',
+          style: Tipografia.manrope(13, peso: FontWeight.w700),
+        ),
+      ),
+    );
+  }
+
   Widget _tarjetaTips() {
-    final tips = instruccionesDe(widget.receta.id);
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.10),
+        color: Colors.white.withValues(alpha: 0.10),
         borderRadius: BorderRadius.circular(16),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Cómo colocarte',
-              style: Tipografia.manrope(12,
-                  peso: FontWeight.w800,
-                  color: Colors.white.withOpacity(0.6))),
+          Text(
+            'Cómo colocarte',
+            style: Tipografia.manrope(
+              12,
+              peso: FontWeight.w800,
+              color: Colors.white.withValues(alpha: 0.6),
+            ),
+          ),
           const SizedBox(height: 10),
-          ...tips.map((t) => Padding(
-                padding: const EdgeInsets.only(bottom: 7),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Padding(
-                      padding: EdgeInsets.only(top: 2, right: 10),
-                      child: Icon(Icons.radio_button_checked,
-                          color: Colores.acento, size: 14),
+          ..._guia.colocacion.map(
+            (t) => Padding(
+              padding: const EdgeInsets.only(bottom: 7),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.only(top: 2, right: 10),
+                    child: Icon(
+                      Icons.radio_button_checked,
+                      color: Colores.acento,
+                      size: 14,
                     ),
-                    Expanded(
-                      child: Text(t,
-                          style: Tipografia.manrope(13.5,
-                              color: Colors.white, altura: 1.35)),
+                  ),
+                  Expanded(
+                    child: Text(
+                      t,
+                      style: Tipografia.manrope(
+                        13.5,
+                        color: Colors.white,
+                        altura: 1.35,
+                      ),
                     ),
-                  ],
-                ),
-              )),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ],
       ),
     );
   }
 
   // --- Fase Entrenando ---
-  Widget _controlesEntrenando() {
+  Widget _controlesEntrenando(DateTime ahora, bool horizontal) {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (_mostrarTips) ...[
-          _tarjetaTips(),
-          const SizedBox(height: 10),
-        ],
-        _bannerFeedback(),
-        const SizedBox(height: 10),
-        Row(
-          children: [
-            TextButton.icon(
-              onPressed: () => setState(() => _mostrarTips = !_mostrarTips),
-              style: TextButton.styleFrom(foregroundColor: Colors.white70),
-              icon: const Icon(Icons.help_outline_rounded, size: 18),
-              label: Text(_mostrarTips ? 'Ocultar' : '¿Cómo me coloco?',
-                  style: Tipografia.manrope(13, peso: FontWeight.w700)),
-            ),
-            const Spacer(),
-          ],
-        ),
+        if (_mostrarTips) ...[_tarjetaTips(), const SizedBox(height: 10)],
+        if (!_entreno.pausado) BannerCoach(mensaje: _entreno.mensaje(ahora)),
         const SizedBox(height: 4),
+        _botonTips(),
         FilledButton(
           onPressed: _guardando ? null : _finalizar,
           style: FilledButton.styleFrom(
@@ -716,62 +1059,21 @@ class _PantallaCamaraState extends State<PantallaCamara> {
             foregroundColor: Colores.oscuro,
             minimumSize: const Size.fromHeight(Medidas.alturaBoton),
             shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(Medidas.radioBoton)),
+              borderRadius: BorderRadius.circular(Medidas.radioBoton),
+            ),
           ),
           child: _guardando
               ? const SizedBox(
                   height: 20,
                   width: 20,
                   child: CircularProgressIndicator(
-                      strokeWidth: 2, color: Colores.oscuro))
+                    strokeWidth: 2,
+                    color: Colores.oscuro,
+                  ),
+                )
               : const Text('Terminar entrenamiento'),
         ),
       ],
-    );
-  }
-
-  Widget _bannerFeedback() {
-    final hayError = _errores.isNotEmpty || !_formaCorrecta;
-    final color = hayError ? Colores.acento : Colores.ok;
-    final titulo = hayError ? 'CORRIGE' : 'BUENA FORMA';
-    final mensaje = _errores.isNotEmpty
-        ? _errores.first.mensaje
-        : (_formaCorrecta ? 'Sigue así, mantén el ritmo' : 'Ajusta tu postura');
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.94),
-        borderRadius: BorderRadius.circular(18),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 38,
-            height: 38,
-            decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.22),
-                shape: BoxShape.circle),
-            child: Icon(hayError ? Icons.priority_high_rounded : Icons.check_rounded,
-                color: Colors.white, size: 22),
-          ),
-          const SizedBox(width: 13),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(titulo,
-                    style: Tipografia.manrope(11,
-                        peso: FontWeight.w800,
-                        color: Colors.white.withOpacity(0.8))),
-                Text(mensaje,
-                    style: Tipografia.sora(15,
-                        peso: FontWeight.w700, color: Colors.white, altura: 1.2)),
-              ],
-            ),
-          ),
-        ],
-      ),
     );
   }
 
@@ -783,19 +1085,28 @@ class _PantallaCamaraState extends State<PantallaCamara> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.videocam_off_rounded, color: Colors.white54, size: 48),
+            const Icon(
+              Icons.videocam_off_rounded,
+              color: Colors.white54,
+              size: 48,
+            ),
             const SizedBox(height: 16),
-            Text('Necesitamos tu cámara',
-                style: Tipografia.sora(20, color: Colors.white),
-                textAlign: TextAlign.center),
+            Text(
+              'Necesitamos tu cámara',
+              style: Tipografia.sora(20, color: Colors.white),
+              textAlign: TextAlign.center,
+            ),
             const SizedBox(height: 8),
-            Text('Actívala para analizar tu técnica. El video nunca sale del teléfono.',
-                style: Tipografia.manrope(14, color: Colors.white70),
-                textAlign: TextAlign.center),
+            Text(
+              'Actívala para analizar tu técnica. El video nunca sale del teléfono.',
+              style: Tipografia.manrope(14, color: Colors.white70),
+              textAlign: TextAlign.center,
+            ),
             const SizedBox(height: 20),
             FilledButton(
-                onPressed: openAppSettings,
-                child: const Text('Abrir ajustes')),
+              onPressed: openAppSettings,
+              child: const Text('Abrir ajustes'),
+            ),
             const SizedBox(height: 8),
             TextButton(
               onPressed: () {
@@ -818,11 +1129,17 @@ class _PantallaCamaraState extends State<PantallaCamara> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.error_outline_rounded, color: Colors.white54, size: 48),
+            const Icon(
+              Icons.error_outline_rounded,
+              color: Colors.white54,
+              size: 48,
+            ),
             const SizedBox(height: 16),
-            Text(_error ?? 'Ocurrió un error',
-                style: Tipografia.manrope(15, color: Colors.white),
-                textAlign: TextAlign.center),
+            Text(
+              _error ?? 'Ocurrió un error',
+              style: Tipografia.manrope(15, color: Colors.white),
+              textAlign: TextAlign.center,
+            ),
           ],
         ),
       ),

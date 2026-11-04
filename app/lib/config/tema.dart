@@ -33,6 +33,7 @@ class Colores {
   // --- OK (verde) --- oklch(0.6 0.13 155) -> #2C965D
   static const Color ok = Color(0xFF2C965D);
   static const Color okSuave = Color(0x242C965D); // 14% (alpha 36)
+  static const Color okFuerte = Color(0xFF237A4B); // superficies verdes con texto blanco (5.3:1)
 }
 
 /// Radios, espaciados y medidas recurrentes del boceto.

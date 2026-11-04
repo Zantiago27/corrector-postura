@@ -215,8 +215,20 @@ class _PantallaHistorialState extends State<PantallaHistorial> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(s.nombre,
-                          style: Tipografia.sora(15.5, peso: FontWeight.w700)),
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(s.nombre,
+                                overflow: TextOverflow.ellipsis,
+                                style: Tipografia.sora(15.5,
+                                    peso: FontWeight.w700)),
+                          ),
+                          if (s.pendiente) ...[
+                            const SizedBox(width: 6),
+                            Componentes.chip('Sin subir'),
+                          ],
+                        ],
+                      ),
                       const SizedBox(height: 2),
                       Text('${etiquetaFecha(s.iniciada)} · ${s.detalle}',
                           style:

@@ -31,6 +31,9 @@ class PantallaResumen extends StatelessWidget {
   /// frecuentes). Puede venir vacía en ejercicios isométricos.
   final List<RepeticionCompletada> repeticiones;
 
+  /// true si no había conexión y la sesión quedó guardada en el teléfono.
+  final bool pendienteDeSubir;
+
   const PantallaResumen({
     super.key,
     required this.camaras,
@@ -40,6 +43,7 @@ class PantallaResumen extends StatelessWidget {
     required this.repsIncorrectas,
     required this.duracionSegundos,
     this.repeticiones = const [],
+    this.pendienteDeSubir = false,
   });
 
   bool get _esIsometrico => receta.tipo == TipoEjercicio.isometrico;
@@ -58,6 +62,14 @@ class PantallaResumen extends StatelessWidget {
     final lista = conteo.entries.toList()
       ..sort((a, b) => b.value.compareTo(a.value));
     return lista.take(3).toList();
+  }
+
+    /// Cómo corregir un error: la explicación larga de la regla de la receta.
+  String? _consejo(String idError) {
+    for (final r in receta.reglasForma) {
+      if (r.id == idError) return r.mensajeLargo;
+    }
+    return null;
   }
 
   void _verProgreso(BuildContext context) {
@@ -83,6 +95,10 @@ class PantallaResumen extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(24, 40, 24, 28),
           children: [
             _encabezado(context),
+            if (pendienteDeSubir) ...[
+              const SizedBox(height: 18),
+              _avisoPendiente(),
+            ],
             const SizedBox(height: 26),
             _tarjetaPrincipal(),
             const SizedBox(height: 16),
@@ -134,6 +150,31 @@ class PantallaResumen extends StatelessWidget {
             style: Tipografia.manrope(14, color: Colores.suave),
             textAlign: TextAlign.center),
       ],
+    );
+  }
+
+    // --- Aviso: guardado sin conexión ---
+  Widget _avisoPendiente() {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colores.acentoSuave,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.cloud_off_rounded, color: Colores.acento),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'Sin conexión: guardamos tu sesión en el teléfono. '
+              'Se subirá sola cuando vuelvas a tener internet.',
+              style: Tipografia.manrope(13,
+                  peso: FontWeight.w600, altura: 1.35),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -249,6 +290,7 @@ class PantallaResumen extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 13),
         decoration: Componentes.tarjeta(radio: 16),
         child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Container(
               width: 36,
@@ -269,6 +311,11 @@ class PantallaResumen extends StatelessWidget {
                       style: Tipografia.manrope(14, peso: FontWeight.w700)),
                   Text('$veces ${veces == 1 ? "vez" : "veces"} esta sesión',
                       style: Tipografia.manrope(12, color: Colores.suave)),
+                  if (_consejo(e.key) != null) ...[
+                    const SizedBox(height: 6),
+                    Text(_consejo(e.key)!,
+                        style: Tipografia.manrope(12.5, altura: 1.35)),
+                  ],
                 ],
               ),
             ),

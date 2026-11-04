@@ -9,6 +9,8 @@ const Map<String, String> _nombresEjercicio = {
   'squat': 'Sentadilla',
   'curl': 'Curl de bíceps',
   'plank': 'Plancha',
+  'pushup': 'Flexiones',
+  'jumping_jack': 'Jumping jacks',
 };
 
 String nombreEjercicio(String id) => _nombresEjercicio[id] ?? id;
@@ -39,9 +41,38 @@ String etiquetaFecha(DateTime f) {
   return '${f.day} ${meses[f.month - 1]}';
 }
 
-/// 'profundidad_insuficiente' -> 'Profundidad insuficiente'.
+/// Nombres legibles de los errores, por id de regla.
+/// Incluye los ids ANTIGUOS para que las sesiones ya guardadas en Supabase
+/// se sigan viendo bien en el historial.
+const Map<String, String> _nombresError = {
+  // Sentadilla
+  'profundidad_insuficiente': 'Poca profundidad',
+  'torso_inclinado': 'Torso muy inclinado',
+  'espalda_curva': 'Espalda inclinada', // id antiguo (antes de la Fase B)
+  // Curl de bíceps
+  'codo_separado': 'Codo separado del cuerpo',
+  'tronco_balanceo': 'Balanceo del tronco',
+  'curl_incompleto': 'Curl incompleto',
+  // Plancha
+  'cadera_caida': 'Cadera caída',
+  'cadera_elevada': 'Cadera muy alta',
+  'cuerpo_no_recto': 'Cuerpo no alineado', // id antiguo (antes de la Fase B)
+  
+  // Flexiones (cadera_caida / cadera_elevada se comparten con la plancha)
+  'profundidad_flexion': 'Flexión poco profunda',
+  'muy_rapido': 'Demasiado rápido',
+  // Jumping jacks
+  'brazos_incompletos': 'Brazos sin subir del todo',
+  'piernas_cerradas': 'Piernas poco abiertas',
+  'asimetria_brazos': 'Brazos desiguales',
+};
+
+/// 'torso_inclinado' -> 'Torso muy inclinado'.
+/// Si el id no está en la tabla: 'algo_nuevo' -> 'Algo nuevo'.
 String embellecerError(String id) {
   if (id.isEmpty) return id;
+  final conocido = _nombresError[id];
+  if (conocido != null) return conocido;
   final t = id.replaceAll('_', ' ');
   return t[0].toUpperCase() + t.substring(1);
 }
@@ -56,6 +87,9 @@ class SesionResumen {
   final int repsIncorrectas;
   final int duracionSegundos;
 
+  /// true si aún no se subió a Supabase (está en la cola del teléfono).
+  final bool pendiente;
+
   SesionResumen({
     required this.id,
     required this.ejercicioId,
@@ -64,6 +98,7 @@ class SesionResumen {
     required this.repsCorrectas,
     required this.repsIncorrectas,
     required this.duracionSegundos,
+    this.pendiente = false,
   });
 
   /// Ejercicio por tiempo (ej. plancha): sin reps pero con duración.
