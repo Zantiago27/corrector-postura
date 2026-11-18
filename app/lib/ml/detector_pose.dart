@@ -1,5 +1,5 @@
 import 'dart:io';
-import 'dart:ui' show Size;
+//import 'dart:ui' show Size;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/services.dart';
@@ -21,7 +21,17 @@ class ResultadoPose {
 /// Envuelve toda la lógica de ML Kit Pose: recibe un frame de la cámara,
 /// lo traduce al formato de ML Kit y devuelve las poses (con sus 33 puntos).
 class DetectorPose {
-  final PoseDetector _detector = PoseDetector(options: PoseDetectorOptions());
+  // Fase I.2: opciones explícitas. Son los valores por defecto, pero así la
+  // decisión queda escrita:
+  //   - base:   el modelo rápido ("accurate" es más preciso pero más lento).
+  //   - stream: sigue a la persona entre frames → menos latencia que
+  //             detectarla desde cero en cada imagen.
+  final PoseDetector _detector = PoseDetector(
+    options: PoseDetectorOptions(
+      model: PoseDetectionModel.base,
+      mode: PoseDetectionMode.stream,
+    ),
+  );
 
   final _orientaciones = {
     DeviceOrientation.portraitUp: 0,

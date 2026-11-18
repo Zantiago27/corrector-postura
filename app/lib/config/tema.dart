@@ -7,9 +7,15 @@
 // Regla: las pantallas NUNCA definen colores "a mano"; siempre usan
 // `Colores`, `Tipografia` y los helpers de este archivo. Así el diseño
 // queda centralizado y cambiar un color/estilo se hace en un solo lugar.
+//
+// Fase I.2: las fuentes van EMPAQUETADAS en assets/fonts (sección `fonts:`
+// del pubspec.yaml). Antes se usaba google_fonts, que las descargaba al
+// abrir la app (demora, saltos de texto y dependencia de internet).
 
+import 'package:flutter/foundation.dart'
+    show LicenseRegistry, LicenseEntryWithLineBreaks;
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
+import 'package:flutter/services.dart' show rootBundle;
 
 /// Paleta extraída del boceto. Los colores que venían en `oklch` ya están
 /// convertidos a sRGB (hex). No instanciar: solo constantes estáticas.
@@ -50,11 +56,12 @@ class Medidas {
 }
 
 /// Tipografía: Sora para encabezados, Manrope para cuerpo.
-/// Si en el futuro prefieres empaquetar las fuentes en assets (offline puro),
-/// solo cambia aquí `GoogleFonts.sora(...)` por `TextStyle(fontFamily: 'Sora')`
-/// y `GoogleFonts.manropeTextTheme` por un TextTheme con fontFamily: 'Manrope'.
+/// Las familias se declaran en pubspec.yaml (pesos 400–800).
 class Tipografia {
   Tipografia._();
+
+  static const String familiaTitulos = 'Sora';
+  static const String familiaCuerpo = 'Manrope';
 
   /// Encabezado con Sora. `tracking` replica el `letter-spacing` del boceto
   /// (en CSS era -0.02em/-0.03em; aquí se escala con el tamaño).
@@ -65,7 +72,8 @@ class Tipografia {
     double altura = 1.1,
     double tracking = -0.02,
   }) {
-    return GoogleFonts.sora(
+    return TextStyle(
+      fontFamily: familiaTitulos,
       fontSize: tam,
       fontWeight: peso,
       color: color,
@@ -81,7 +89,8 @@ class Tipografia {
     Color color = Colores.tinta,
     double altura = 1.4,
   }) {
-    return GoogleFonts.manrope(
+    return TextStyle(
+      fontFamily: familiaCuerpo,
       fontSize: tam,
       fontWeight: peso,
       color: color,
@@ -91,7 +100,8 @@ class Tipografia {
 
   /// Construye el TextTheme global: Manrope de base, encabezados en Sora.
   static TextTheme textTheme(TextTheme base) {
-    final cuerpo = GoogleFonts.manropeTextTheme(base).apply(
+    final cuerpo = base.apply(
+      fontFamily: familiaCuerpo,
       bodyColor: Colores.tinta,
       displayColor: Colores.tinta,
     );
@@ -102,13 +112,26 @@ class Tipografia {
       headlineMedium: sora(22, peso: FontWeight.w800),
       titleLarge: sora(19, peso: FontWeight.w800, altura: 1.2),
       titleMedium: sora(17, peso: FontWeight.w700, altura: 1.2),
-      labelLarge: GoogleFonts.manrope(
+      labelLarge: const TextStyle(
+        fontFamily: familiaCuerpo,
         fontSize: 16,
         fontWeight: FontWeight.w800,
         color: Colores.sobreAcento,
       ),
     );
   }
+}
+
+/// Registra las licencias OFL de las fuentes empaquetadas (lo exige la
+/// licencia). Aparecen en la pantalla de licencias de Flutter.
+/// Llamar una vez en main(), antes de runApp.
+void registrarLicenciasFuentes() {
+  LicenseRegistry.addLicense(() async* {
+    for (final familia in [Tipografia.familiaTitulos, Tipografia.familiaCuerpo]) {
+      final texto = await rootBundle.loadString('assets/fonts/OFL-$familia.txt');
+      yield LicenseEntryWithLineBreaks([familia], texto);
+    }
+  });
 }
 
 /// Estilos reutilizables de componentes (botones, tarjetas, chips, inputs).
@@ -139,7 +162,11 @@ class Componentes {
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(Medidas.radioBoton),
         ),
-        textStyle: GoogleFonts.manrope(fontSize: 16, fontWeight: FontWeight.w800),
+        textStyle: const TextStyle(
+          fontFamily: Tipografia.familiaCuerpo,
+          fontSize: 16,
+          fontWeight: FontWeight.w800,
+        ),
       );
 
   /// Estilo de botón secundario (contorno, fondo tarjeta).
@@ -151,7 +178,11 @@ class Componentes {
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(Medidas.radioBoton),
         ),
-        textStyle: GoogleFonts.manrope(fontSize: 15, fontWeight: FontWeight.w700),
+        textStyle: const TextStyle(
+          fontFamily: Tipografia.familiaCuerpo,
+          fontSize: 15,
+          fontWeight: FontWeight.w700,
+        ),
       );
 
   /// "Pill" / etiqueta (chip) reutilizable.
@@ -168,7 +199,8 @@ class Componentes {
       ),
       child: Text(
         texto,
-        style: GoogleFonts.manrope(
+        style: TextStyle(
+          fontFamily: Tipografia.familiaCuerpo,
           fontSize: 11,
           fontWeight: FontWeight.w700,
           color: color,
@@ -180,7 +212,12 @@ class Componentes {
 
 /// Construye el ThemeData completo de la app. Se usa en `main.dart`.
 ThemeData construirTema() {
-  final base = ThemeData(brightness: Brightness.light, useMaterial3: true);
+  // fontFamily en la base: cualquier texto sin estilo propio usa Manrope.
+  final base = ThemeData(
+    brightness: Brightness.light,
+    useMaterial3: true,
+    fontFamily: Tipografia.familiaCuerpo,
+  );
 
   final esquema = ColorScheme.fromSeed(
     seedColor: Colores.acento,
@@ -206,7 +243,10 @@ ThemeData construirTema() {
       filled: true,
       fillColor: Colores.tarjeta,
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-      hintStyle: GoogleFonts.manrope(color: const Color(0xFFB6B0A7)),
+      hintStyle: const TextStyle(
+        fontFamily: Tipografia.familiaCuerpo,
+        color: Color(0xFFB6B0A7),
+      ),
       border: OutlineInputBorder(
         borderRadius: BorderRadius.circular(Medidas.radioInput),
         borderSide: const BorderSide(color: Colores.linea),

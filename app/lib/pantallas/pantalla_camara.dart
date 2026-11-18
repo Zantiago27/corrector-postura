@@ -70,6 +70,10 @@ class _PantallaCamaraState extends State<PantallaCamara>
   /// alcanzan; por eso ya vive en una variable.)
   final ResolutionPreset _resolucion = ResolutionPreset.medium;
 
+  /// FPS que se piden a la cámara (Fase I.2). Ponlo en null para no pedir
+  /// nada y comparar con el modo diagnóstico.
+  static const int? _fpsObjetivo = 30;
+
   // --- Diagnóstico (Fase I.1) ---
   // Solo existe si el modo diagnóstico está activo en Ajustes.
   MedidorRendimiento? _medidor;
@@ -224,9 +228,11 @@ class _PantallaCamaraState extends State<PantallaCamara>
     await _crearControlador(camaraFrontal);
   }
 
-  /// Crea (o recrea) el controlador para una cámara concreta y arranca el
+    /// Crea (o recrea) el controlador para una cámara concreta y arranca el
   /// stream. Se reutiliza al cambiar de cámara y al volver de segundo plano.
-  Future<void> _crearControlador(CameraDescription camara) async {
+  /// [pedirFps] = false es el plan B si el teléfono rechaza los FPS pedidos.
+  Future<void> _crearControlador(CameraDescription camara,
+      {bool pedirFps = true}) async {
     _camaraActiva = camara;
     final generacion = ++_generacionCamara;
     final controlador = CameraController(
@@ -234,6 +240,7 @@ class _PantallaCamaraState extends State<PantallaCamara>
       _resolucion,
       enableAudio: false,
       imageFormatGroup: ImageFormatGroup.nv21,
+      fps: pedirFps ? _fpsObjetivo : null,
     );
     try {
       await controlador.initialize();
@@ -252,6 +259,13 @@ class _PantallaCamaraState extends State<PantallaCamara>
     } catch (e) {
       await _liberarControlador(controlador);
       if (!mounted) return;
+      // Plan B: algunos teléfonos no aceptan los FPS pedidos. Reintentamos
+      // UNA vez sin pedirlos antes de mostrar el error.
+      if (pedirFps && _fpsObjetivo != null && generacion == _generacionCamara) {
+        debugPrint('La cámara rechazó fps=$_fpsObjetivo ($e); '
+            'reintentando sin fps.');
+        return _crearControlador(camara, pedirFps: false);
+      }
       setState(() {
         _error = 'No se pudo iniciar la cámara: $e';
         _inicializando = false;

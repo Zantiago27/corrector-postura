@@ -39,7 +39,7 @@ dependencies:
   permission_handler: ^13.0.2
   flutter_tts: ^4.2.5
   supabase_flutter: ^2.18.0
-  google_fonts: ^6.2.1
+  #google_fonts: ^6.2.1
   speech_to_text: ^7.5.0  #para comandos de voz
   shared_preferences: ^2.5.6
   wakelock_plus: ^1.8.2
@@ -66,6 +66,35 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  # Fase I.2: fuentes empaquetadas (antes se descargaban con google_fonts).
+  assets:
+    - assets/fonts/OFL-Sora.txt
+    - assets/fonts/OFL-Manrope.txt
+
+  fonts:
+    - family: Sora
+      fonts:
+        - asset: assets/fonts/Sora-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/Sora-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/Sora-Bold.ttf
+          weight: 700
+        - asset: assets/fonts/Sora-ExtraBold.ttf
+          weight: 800
+    - family: Manrope
+      fonts:
+        - asset: assets/fonts/Manrope-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/Manrope-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/Manrope-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/Manrope-Bold.ttf
+          weight: 700
+        - asset: assets/fonts/Manrope-ExtraBold.ttf
+          weight: 800
 
   # To add assets to your application, add an assets section, like this:
   # assets:

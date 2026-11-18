@@ -20,6 +20,7 @@ import 'config/tema.dart';
 Future<void> main() async {
   // Requerido para usar plugins (como la cámara) antes de arrancar la app.
   WidgetsFlutterBinding.ensureInitialized();
+  registrarLicenciasFuentes(); // Fase I.2: licencia OFL de Sora y Manrope
   //supabase
   await Supabase.initialize(
     url: SupabaseConfig.url,
