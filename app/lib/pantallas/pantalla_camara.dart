@@ -29,6 +29,12 @@ import 'widgets_coaching.dart';
 ///
 /// Fase D: flujo manos libres (inicio automático con cuenta regresiva y
 /// pausa automática), silueta guía y soporte de orientación horizontal.
+///
+/// Fase I.3: la pantalla completa ya NO se reconstruye en cada frame.
+/// Las partes que cambian por frame (esqueleto, contador, banner, cuenta,
+/// destello, diagnóstico) escuchan a [_frame]; el resto solo se reconstruye
+/// con setState cuando cambia la "estructura" (estado de la sesión o
+/// encuadre), algo que pasa pocas veces por serie.
 class PantallaCamara extends StatefulWidget {
   final List<CameraDescription> camaras;
   final RecetaEjercicio receta;
@@ -66,13 +72,23 @@ class _PantallaCamaraState extends State<PantallaCamara>
   bool _procesando = false;
   ResultadoPose? _resultado;
 
+  // --- Reconstrucción por frame (Fase I.3) ---
+  /// Avanza en cada frame analizado. Solo lo escuchan las partes de la UI
+  /// que cambian por frame (ver [_porFrame]).
+  final ValueNotifier<int> _frame = ValueNotifier(0);
+
+  /// Última "estructura" dibujada: si cambia, hace falta un setState
+  /// (aparecen/desaparecen capas, cambian botones).
+  (EstadoSesion, bool)? _ultimaEstructura;
+
   /// Calidad pedida a la cámara. (En I.6 podrá bajar sola si los FPS no
   /// alcanzan; por eso ya vive en una variable.)
   final ResolutionPreset _resolucion = ResolutionPreset.medium;
 
-  /// FPS que se piden a la cámara (Fase I.2). Ponlo en null para no pedir
-  /// nada y comparar con el modo diagnóstico.
-  static const int? _fpsObjetivo = 30;
+  /// FPS que se piden a la cámara (Fase I.2). Para comparar con el modo
+  /// diagnóstico sin pedir nada, pon [_pedirFpsACamara] en false.
+  static const int _fpsObjetivo = 30;
+  static const bool _pedirFpsACamara = true;
 
   // --- Diagnóstico (Fase I.1) ---
   // Solo existe si el modo diagnóstico está activo en Ajustes.
@@ -228,7 +244,7 @@ class _PantallaCamaraState extends State<PantallaCamara>
     await _crearControlador(camaraFrontal);
   }
 
-    /// Crea (o recrea) el controlador para una cámara concreta y arranca el
+  /// Crea (o recrea) el controlador para una cámara concreta y arranca el
   /// stream. Se reutiliza al cambiar de cámara y al volver de segundo plano.
   /// [pedirFps] = false es el plan B si el teléfono rechaza los FPS pedidos.
   Future<void> _crearControlador(CameraDescription camara,
@@ -240,7 +256,7 @@ class _PantallaCamaraState extends State<PantallaCamara>
       _resolucion,
       enableAudio: false,
       imageFormatGroup: ImageFormatGroup.nv21,
-      fps: pedirFps ? _fpsObjetivo : null,
+      fps: pedirFps && _pedirFpsACamara ? _fpsObjetivo : null,
     );
     try {
       await controlador.initialize();
@@ -261,7 +277,7 @@ class _PantallaCamaraState extends State<PantallaCamara>
       if (!mounted) return;
       // Plan B: algunos teléfonos no aceptan los FPS pedidos. Reintentamos
       // UNA vez sin pedirlos antes de mostrar el error.
-      if (pedirFps && _fpsObjetivo != null && generacion == _generacionCamara) {
+      if (pedirFps && _pedirFpsACamara && generacion == _generacionCamara) {
         debugPrint('La cámara rechazó fps=$_fpsObjetivo ($e); '
             'reintentando sin fps.');
         return _crearControlador(camara, pedirFps: false);
@@ -355,7 +371,7 @@ class _PantallaCamaraState extends State<PantallaCamara>
   // PROCESAMIENTO DE FRAMES
   // ===========================================================================
 
-    Future<void> _procesarFrame(CameraImage imagen, int generacion) async {
+  Future<void> _procesarFrame(CameraImage imagen, int generacion) async {
     // Descarta frames de una cámara que ya no está activa.
     if (generacion != _generacionCamara) return;
     final medidor = _medidor;
@@ -399,12 +415,25 @@ class _PantallaCamaraState extends State<PantallaCamara>
             resultado.tamanoImagen.height.round());
       }
 
-      setState(() => _resultado = resultado);
+      _resultado = resultado;
+      _notificarFrame();
     } catch (e) {
       debugPrint('Error procesando frame: $e');
     } finally {
       _procesando = false;
     }
+  }
+
+  /// Fase I.3: tras cada frame avisa SOLO a las partes que cambian por frame.
+  /// La pantalla completa se reconstruye únicamente si cambió la estructura
+  /// (estado de la sesión o encuadre).
+  void _notificarFrame() {
+    final estructura = (_entreno.estado, _entreno.encuadreOk);
+    if (estructura != _ultimaEstructura) {
+      _ultimaEstructura = estructura;
+      setState(() {});
+    }
+    _frame.value++;
   }
 
   /// Dice en voz alta lo que decidió el controlador (si la voz está activa).
@@ -503,6 +532,7 @@ class _PantallaCamaraState extends State<PantallaCamara>
     _detectorPose.cerrar();
     _voz.cerrar();
     _comandos.cerrar();
+    _frame.dispose();
     super.dispose();
   }
 
@@ -515,6 +545,18 @@ class _PantallaCamaraState extends State<PantallaCamara>
     return Scaffold(backgroundColor: Colores.oscuro, body: _contenido());
   }
 
+  /// Envuelve una parte de la UI que cambia en CADA frame: se reconstruye
+  /// sola al llegar un frame, sin reconstruir el resto de la pantalla.
+  /// RepaintBoundary aísla su repintado del resto de capas.
+  Widget _porFrame(WidgetBuilder construir) {
+    return RepaintBoundary(
+      child: ListenableBuilder(
+        listenable: _frame,
+        builder: (context, _) => construir(context),
+      ),
+    );
+  }
+
   Widget _contenido() {
     if (_inicializando) {
       return const Center(
@@ -524,32 +566,32 @@ class _PantallaCamaraState extends State<PantallaCamara>
     if (!_permisoConcedido) return _vistaPermiso();
     if (_error != null) return _vistaError();
 
-    final ahora = DateTime.now();
     final horizontal =
         MediaQuery.orientationOf(context) == Orientation.landscape;
-    final numeroCuenta = _entreno.numeroCuenta(ahora);
 
     return Stack(
       // Todas las capas son Positioned: con "expand" el Stack siempre ocupa
       // toda la pantalla (si no, un hijo de tamaño 0 lo encogía a 0x0).
       fit: StackFit.expand,
       children: [
-        _preview(ahora),
+        _preview(),
         if (!_entrenando) _siluetaGuia(horizontal),
         if (_entrenando)
           Positioned.fill(
-            child: DestelloVeredicto(
-              idVeredicto: _entreno.coach.idVeredicto,
-              correcto: _entreno.coach.ultimoVeredictoCorrecto ?? true,
+            child: _porFrame(
+              (_) => DestelloVeredicto(
+                idVeredicto: _entreno.coach.idVeredicto,
+                correcto: _entreno.coach.ultimoVeredictoCorrecto ?? true,
+              ),
             ),
           ),
-        if (numeroCuenta != null) _cuentaRegresiva(numeroCuenta),
+        if (_entreno.enCuentaRegresiva) _cuentaRegresiva(),
         if (_entreno.pausado) _velaPausa(),
         _barraSuperior(),
         if (!_entrenando && _sugerirGirar(horizontal))
           _avisoOrientacion(horizontal),
         if (_entrenando && !_entreno.pausado) _hudContador(horizontal),
-        _panelInferior(ahora, horizontal),
+        _panelInferior(horizontal),
         if (_medidor != null) _panelDiagnostico(),
         if (_cambiandoCamara)
           const Positioned.fill(
@@ -564,9 +606,8 @@ class _PantallaCamaraState extends State<PantallaCamara>
     );
   }
 
-  Widget _preview(DateTime ahora) {
+  Widget _preview() {
     final controlador = _controlador;
-    final resultado = _resultado;
     // Durante el cambio de cámara (o en segundo plano) no hay controlador:
     // mostramos fondo oscuro; el spinner de _cambiandoCamara va encima.
     if (controlador == null || !controlador.value.isInitialized) {
@@ -574,20 +615,27 @@ class _PantallaCamaraState extends State<PantallaCamara>
     }
     return Positioned.fill(
       child: Center(
+        // CameraPreview ya no se reconstruye por frame: solo el esqueleto.
         child: CameraPreview(
           controlador,
-          child: resultado == null
-              ? const SizedBox.shrink()
-              : CustomPaint(
-                  painter: PintorEsqueleto(
-                    poses: resultado.poses,
-                    tamanoImagen: resultado.tamanoImagen,
-                    rotacion: resultado.rotacion,
-                    lente: _camaraActiva!.lensDirection,
-                    formaCorrecta: _entreno.formaCorrecta(ahora),
-                    articulacionesResaltadas: _entreno.resaltadas(ahora),
-                  ),
-                ),
+          child: _porFrame((_) {
+            final resultado = _resultado;
+            final camara = _camaraActiva;
+            if (resultado == null || camara == null) {
+              return const SizedBox.shrink();
+            }
+            final ahora = DateTime.now();
+            return CustomPaint(
+              painter: PintorEsqueleto(
+                poses: resultado.poses,
+                tamanoImagen: resultado.tamanoImagen,
+                rotacion: resultado.rotacion,
+                lente: camara.lensDirection,
+                formaCorrecta: _entreno.formaCorrecta(ahora),
+                articulacionesResaltadas: _entreno.resaltadas(ahora),
+              ),
+            );
+          }),
         ),
       ),
     );
@@ -620,36 +668,39 @@ class _PantallaCamaraState extends State<PantallaCamara>
     );
   }
 
-  /// Número grande de la cuenta regresiva.
-  Widget _cuentaRegresiva(int numero) {
+  /// Número grande de la cuenta regresiva (el número cambia por frame).
+  Widget _cuentaRegresiva() {
     return Positioned.fill(
       child: IgnorePointer(
         child: Center(
-          child: AnimatedSwitcher(
-            duration: const Duration(milliseconds: 250),
-            transitionBuilder: (child, a) =>
-                ScaleTransition(scale: a, child: child),
-            child: Container(
-              key: ValueKey(numero),
-              width: 150,
-              height: 150,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: Colores.oscuro.withValues(alpha: 0.75),
-                shape: BoxShape.circle,
-                border: Border.all(color: Colores.acento, width: 4),
-              ),
-              child: Text(
-                '$numero',
-                style: Tipografia.sora(
-                  80,
-                  peso: FontWeight.w800,
-                  color: Colors.white,
-                  altura: 1,
+          child: _porFrame((_) {
+            final numero = _entreno.numeroCuenta(DateTime.now()) ?? 1;
+            return AnimatedSwitcher(
+              duration: const Duration(milliseconds: 250),
+              transitionBuilder: (child, a) =>
+                  ScaleTransition(scale: a, child: child),
+              child: Container(
+                key: ValueKey(numero),
+                width: 150,
+                height: 150,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colores.oscuro.withValues(alpha: 0.75),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colores.acento, width: 4),
+                ),
+                child: Text(
+                  '$numero',
+                  style: Tipografia.sora(
+                    80,
+                    peso: FontWeight.w800,
+                    color: Colors.white,
+                    altura: 1,
+                  ),
                 ),
               ),
-            ),
-          ),
+            );
+          }),
         ),
       ),
     );
@@ -814,8 +865,25 @@ class _PantallaCamaraState extends State<PantallaCamara>
   /// "vale" la rep bien hecha. Las que hay que corregir van aparte, en pequeño.
   /// En horizontal se coloca arriba a la izquierda y más compacto.
   Widget _hudContador(bool horizontal) {
+    return Positioned(
+      top: 0,
+      left: 0,
+      right: horizontal ? null : 0,
+      child: SafeArea(
+        child: Padding(
+          padding: horizontal
+              ? const EdgeInsets.only(top: 60, left: 20)
+              : const EdgeInsets.only(top: 66),
+          child: _porFrame((_) => _contenidoHud(horizontal)),
+        ),
+      ),
+    );
+  }
+
+  /// Lo que cambia del contador: número, tira ●●○ y "a corregir".
+  Widget _contenidoHud(bool horizontal) {
     final aCorregir = _entreno.repsIncorrectas;
-    final contenido = Column(
+    return Column(
       crossAxisAlignment:
           horizontal ? CrossAxisAlignment.start : CrossAxisAlignment.center,
       children: [
@@ -854,20 +922,6 @@ class _PantallaCamaraState extends State<PantallaCamara>
         ],
       ],
     );
-
-    return Positioned(
-      top: 0,
-      left: 0,
-      right: horizontal ? null : 0,
-      child: SafeArea(
-        child: Padding(
-          padding: horizontal
-              ? const EdgeInsets.only(top: 60, left: 20)
-              : const EdgeInsets.only(top: 66),
-          child: contenido,
-        ),
-      ),
-    );
   }
 
   Widget _pill(String texto, Color punto) {
@@ -901,10 +955,10 @@ class _PantallaCamaraState extends State<PantallaCamara>
 
   /// Panel inferior: abajo a lo ancho (vertical) o abajo a la derecha
   /// (horizontal, para no tapar el cuerpo).
-  Widget _panelInferior(DateTime ahora, bool horizontal) {
+  Widget _panelInferior(bool horizontal) {
     final contenido = _entrenando
-        ? _controlesEntrenando(ahora, horizontal)
-        : _controlesPreparando(ahora, horizontal);
+        ? _controlesEntrenando(horizontal)
+        : _controlesPreparando(horizontal);
     return Positioned(
       left: horizontal ? null : 0,
       right: 0,
@@ -922,7 +976,7 @@ class _PantallaCamaraState extends State<PantallaCamara>
   }
 
   // --- Fase Prepárate (incluye la cuenta regresiva) ---
-  Widget _controlesPreparando(DateTime ahora, bool horizontal) {
+  Widget _controlesPreparando(bool horizontal) {
     final ok = _entreno.encuadreOk;
     final enCuenta = _entreno.enCuentaRegresiva;
     // En horizontal hay poca altura: los tips se abren solo a petición.
@@ -930,7 +984,8 @@ class _PantallaCamaraState extends State<PantallaCamara>
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        _bannerPreparacion(ahora),
+        // Solo el banner cambia por frame (barra de progreso).
+        _porFrame((_) => _bannerPreparacion(DateTime.now())),
         if (verTips) ...[
           const SizedBox(height: 12),
           _tarjetaTips(),
@@ -1090,12 +1145,14 @@ class _PantallaCamaraState extends State<PantallaCamara>
   }
 
   // --- Fase Entrenando ---
-  Widget _controlesEntrenando(DateTime ahora, bool horizontal) {
+  Widget _controlesEntrenando(bool horizontal) {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
         if (_mostrarTips) ...[_tarjetaTips(), const SizedBox(height: 10)],
-        if (!_entreno.pausado) BannerCoach(mensaje: _entreno.mensaje(ahora)),
+        if (!_entreno.pausado)
+          _porFrame(
+              (_) => BannerCoach(mensaje: _entreno.mensaje(DateTime.now()))),
         const SizedBox(height: 4),
         _botonTips(),
         FilledButton(
@@ -1123,16 +1180,11 @@ class _PantallaCamaraState extends State<PantallaCamara>
     );
   }
 
-
-    // --- Diagnóstico (Fase I.1) ---
+  // --- Diagnóstico (Fase I.1) ---
 
   /// Panel con las cifras de rendimiento en vivo. Es Positioned (regla del
   /// Stack: nunca un hijo sin posicionar → pantalla negra).
   Widget _panelDiagnostico() {
-    final m = _medidor!.instantanea(DateTime.now());
-    final fpsBajo = m.fpsAnalisis < 12;
-    String f(double v) => v.toStringAsFixed(1);
-    final tamano = m.ancho == null ? '' : '\n${m.ancho}×${m.alto}';
     return Positioned(
       top: 0,
       right: 0,
@@ -1140,33 +1192,41 @@ class _PantallaCamaraState extends State<PantallaCamara>
         child: Padding(
           padding: const EdgeInsets.only(top: 56, right: 16),
           child: IgnorePointer(
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-              decoration: BoxDecoration(
-                color: Colores.oscuro.withValues(alpha: 0.8),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(
-                  color: fpsBajo ? Colores.acento : Colores.ok,
-                  width: 1.5,
-                ),
-              ),
-              child: Text(
-                'CÁM  ${f(m.fpsCamara)} fps\n'
-                'ML   ${f(m.fpsAnalisis)} fps\n'
-                'DET  ${m.msDeteccion.toStringAsFixed(0)} ms\n'
-                'LÓG  ${f(m.msLogica)} ms\n'
-                'DESC ${m.pctDescartados.toStringAsFixed(0)} %'
-                '$tamano',
-                style: const TextStyle(
-                  fontFamily: 'monospace',
-                  fontSize: 11,
-                  height: 1.35,
-                  fontWeight: FontWeight.w600,
-                  color: Colors.white,
-                ),
-              ),
-            ),
+            child: _porFrame((_) => _contenidoDiagnostico()),
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _contenidoDiagnostico() {
+    final m = _medidor!.instantanea(DateTime.now());
+    final fpsBajo = m.fpsAnalisis < 12;
+    String f(double v) => v.toStringAsFixed(1);
+    final tamano = m.ancho == null ? '' : '\n${m.ancho}×${m.alto}';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colores.oscuro.withValues(alpha: 0.8),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: fpsBajo ? Colores.acento : Colores.ok,
+          width: 1.5,
+        ),
+      ),
+      child: Text(
+        'CÁM  ${f(m.fpsCamara)} fps\n'
+        'ML   ${f(m.fpsAnalisis)} fps\n'
+        'DET  ${m.msDeteccion.toStringAsFixed(0)} ms\n'
+        'LÓG  ${f(m.msLogica)} ms\n'
+        'DESC ${m.pctDescartados.toStringAsFixed(0)} %'
+        '$tamano',
+        style: const TextStyle(
+          fontFamily: 'monospace',
+          fontSize: 11,
+          height: 1.35,
+          fontWeight: FontWeight.w600,
+          color: Colors.white,
         ),
       ),
     );
