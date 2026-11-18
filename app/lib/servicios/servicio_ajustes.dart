@@ -27,12 +27,17 @@ class Ajustes {
   /// permiso).
   final bool reconocimientoSoloDispositivo;
 
+  /// Fase I.1: muestra FPS/tiempos en la cámara y guarda un resumen por
+  /// sesión en el teléfono (para pruebas de rendimiento).
+  final bool modoDiagnostico;
+
   const Ajustes({
     this.tono = 1.0,
     this.velocidad = 0.5,
     this.acento = AcentoVoz.latino,
     this.vozActiva = true,
     this.reconocimientoSoloDispositivo = true,
+    this.modoDiagnostico = false,
   });
 
   /// Idioma para el TTS (flutter_tts).
@@ -48,6 +53,7 @@ class Ajustes {
     AcentoVoz? acento,
     bool? vozActiva,
     bool? reconocimientoSoloDispositivo,
+    bool? modoDiagnostico,
   }) =>
       Ajustes(
         tono: tono ?? this.tono,
@@ -56,6 +62,7 @@ class Ajustes {
         vozActiva: vozActiva ?? this.vozActiva,
         reconocimientoSoloDispositivo:
             reconocimientoSoloDispositivo ?? this.reconocimientoSoloDispositivo,
+        modoDiagnostico: modoDiagnostico ?? this.modoDiagnostico,
       );
 }
 
@@ -67,6 +74,7 @@ class ServicioAjustes {
   static const _acento = 'ajustes_acento';
   static const _vozActiva = 'ajustes_voz_activa';
   static const _soloDispositivo = 'ajustes_stt_solo_dispositivo';
+  static const _diagnostico = 'ajustes_modo_diagnostico';
 
   static Future<Ajustes> cargar() async {
     final p = await SharedPreferences.getInstance();
@@ -80,6 +88,7 @@ class ServicioAjustes {
       vozActiva: p.getBool(_vozActiva) ?? def.vozActiva,
       reconocimientoSoloDispositivo:
           p.getBool(_soloDispositivo) ?? def.reconocimientoSoloDispositivo,
+      modoDiagnostico: p.getBool(_diagnostico) ?? def.modoDiagnostico,
     );
   }
 
@@ -90,5 +99,6 @@ class ServicioAjustes {
     await p.setString(_acento, a.acento.name);
     await p.setBool(_vozActiva, a.vozActiva);
     await p.setBool(_soloDispositivo, a.reconocimientoSoloDispositivo);
+    await p.setBool(_diagnostico, a.modoDiagnostico);
   }
 }

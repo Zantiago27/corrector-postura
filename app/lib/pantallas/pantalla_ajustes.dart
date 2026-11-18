@@ -5,9 +5,11 @@
 // se guarda con su botón (va a Supabase).
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../config/tema.dart';
+import '../servicios/registro_rendimiento.dart';
 import '../servicios/servicio_ajustes.dart';
 import '../servicios/servicio_voz.dart';
 
@@ -25,6 +27,7 @@ class _PantallaAjustesState extends State<PantallaAjustes> {
   Ajustes _ajustes = const Ajustes();
   bool _cargando = true;
   bool _guardandoNombre = false;
+  int _numRegistros = 0; // filas del registro de rendimiento (Fase I.1)
 
   @override
   void initState() {
@@ -39,9 +42,11 @@ class _PantallaAjustesState extends State<PantallaAjustes> {
     final a = await ServicioAjustes.cargar();
     await _voz.inicializar(
         tono: a.tono, velocidad: a.velocidad, idioma: a.idiomaVoz);
+    final registros = await ServicioRegistroRendimiento.listar();
     if (!mounted) return;
     setState(() {
       _ajustes = a;
+      _numRegistros = registros.length;
       _cargando = false;
     });
   }
@@ -114,6 +119,9 @@ class _PantallaAjustesState extends State<PantallaAjustes> {
                 const SizedBox(height: 24),
                 _titulo('Privacidad'),
                 _seccionPrivacidad(),
+                const SizedBox(height: 24),
+                _titulo('Diagnóstico'),
+                _seccionDiagnostico(),
               ],
             ),
     );
@@ -314,4 +322,97 @@ class _PantallaAjustesState extends State<PantallaAjustes> {
       ),
     );
   }
+
+    // --- Diagnóstico (Fase I.1) ---
+  Widget _seccionDiagnostico() {
+    final a = _ajustes;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 6, 16, 16),
+      decoration: Componentes.tarjeta(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            activeTrackColor: Colores.acento,
+            title: Text('Modo diagnóstico',
+                style: Tipografia.manrope(14, peso: FontWeight.w700)),
+            subtitle: Text(
+              'Muestra FPS y tiempos de análisis al entrenar y guarda un '
+              'resumen de cada sesión en este teléfono. Para pruebas.',
+              style: Tipografia.manrope(12.5, color: Colores.suave),
+            ),
+            value: a.modoDiagnostico,
+            onChanged: (v) => _cambiar(a.copyWith(modoDiagnostico: v)),
+          ),
+          const Divider(color: Colores.linea),
+          const SizedBox(height: 6),
+          Text(
+            _numRegistros == 1
+                ? '1 sesión registrada'
+                : '$_numRegistros sesiones registradas',
+            style: Tipografia.manrope(14, peso: FontWeight.w700),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _numRegistros == 0 ? null : _copiarRegistro,
+                  icon: const Icon(Icons.copy_rounded),
+                  label: const Text('Copiar'),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _numRegistros == 0 ? null : _borrarRegistro,
+                  icon: const Icon(Icons.delete_outline_rounded),
+                  label: const Text('Borrar'),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Copia el registro como tabla (tabuladores) para pegarlo en la planilla.
+  Future<void> _copiarRegistro() async {
+    final registros = await ServicioRegistroRendimiento.listar();
+    if (registros.isEmpty) return;
+    await Clipboard.setData(
+        ClipboardData(text: RegistroRendimiento.comoTabla(registros)));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text('${registros.length} sesiones copiadas. '
+          'Pégalas en la planilla.'),
+    ));
+  }
+
+  Future<void> _borrarRegistro() async {
+    final confirmar = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('¿Borrar el registro?'),
+        content: const Text('Se eliminarán los datos de rendimiento '
+            'guardados en este teléfono. Cópialos antes si los necesitas.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancelar')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Borrar')),
+        ],
+      ),
+    );
+    if (confirmar != true) return;
+    await ServicioRegistroRendimiento.borrar();
+    if (!mounted) return;
+    setState(() => _numRegistros = 0);
+  }
+
+
 }

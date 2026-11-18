@@ -43,6 +43,7 @@ dependencies:
   speech_to_text: ^7.5.0  #para comandos de voz
   shared_preferences: ^2.5.6
   wakelock_plus: ^1.8.2
+  device_info_plus: ^13.3.0
 
 dev_dependencies:
   flutter_test:

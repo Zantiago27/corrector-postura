@@ -6,10 +6,12 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../config/tema.dart';
 import '../core/coach_entrenamiento.dart';
+import '../core/medidor_rendimiento.dart';
 import '../core/controlador_entrenamiento.dart';
 import '../ejercicios/instrucciones_ejercicio.dart';
 import '../ejercicios/receta_ejercicio.dart';
 import '../ml/detector_pose.dart';
+import '../servicios/registro_rendimiento.dart';
 import '../servicios/servicio_comandos.dart';
 import '../servicios/servicio_ajustes.dart';
 import '../servicios/servicio_sesiones.dart';
@@ -63,6 +65,14 @@ class _PantallaCamaraState extends State<PantallaCamara>
 
   bool _procesando = false;
   ResultadoPose? _resultado;
+
+  /// Calidad pedida a la cámara. (En I.6 podrá bajar sola si los FPS no
+  /// alcanzan; por eso ya vive en una variable.)
+  final ResolutionPreset _resolucion = ResolutionPreset.medium;
+
+  // --- Diagnóstico (Fase I.1) ---
+  // Solo existe si el modo diagnóstico está activo en Ajustes.
+  MedidorRendimiento? _medidor;
 
   // --- Entrenamiento ---
   late final ControladorEntrenamiento _entreno;
@@ -123,6 +133,7 @@ class _PantallaCamaraState extends State<PantallaCamara>
     _comandos
       ..soloDispositivo = a.reconocimientoSoloDispositivo
       ..localeId = a.idiomaReconocimiento;
+    if (a.modoDiagnostico) _medidor ??= MedidorRendimiento();
     if (mounted) setState(() => _vozActiva = a.vozActiva);
   }
 
@@ -220,7 +231,7 @@ class _PantallaCamaraState extends State<PantallaCamara>
     final generacion = ++_generacionCamara;
     final controlador = CameraController(
       camara,
-      ResolutionPreset.medium,
+      _resolucion,
       enableAudio: false,
       imageFormatGroup: ImageFormatGroup.nv21,
     );
@@ -330,30 +341,49 @@ class _PantallaCamaraState extends State<PantallaCamara>
   // PROCESAMIENTO DE FRAMES
   // ===========================================================================
 
-  Future<void> _procesarFrame(CameraImage imagen, int generacion) async {
+    Future<void> _procesarFrame(CameraImage imagen, int generacion) async {
     // Descarta frames de una cámara que ya no está activa.
-    if (_procesando || generacion != _generacionCamara) return;
+    if (generacion != _generacionCamara) return;
+    final medidor = _medidor;
+    medidor?.frameRecibido(DateTime.now());
+
+    // Un frame a la vez: si ML Kit sigue ocupado, este frame se pierde.
+    if (_procesando) {
+      medidor?.frameDescartado();
+      return;
+    }
     final controlador = _controlador;
     final camara = _camaraActiva;
     if (controlador == null || camara == null) return;
     _procesando = true;
+    final cronometro = Stopwatch()..start();
     try {
       final resultado = await _detectorPose.procesarFrame(
         imagen: imagen,
         controlador: controlador,
         camara: camara,
       );
+      final msDeteccion = cronometro.elapsedMicroseconds / 1000;
       // Mientras ML Kit procesaba, pudo cambiar la cámara o cerrarse la
       // pantalla: en ese caso este resultado ya no vale.
       if (!mounted || generacion != _generacionCamara) return;
 
       // Toda la lógica (encuadre, cuenta regresiva, conteo, coaching,
       // pausa automática) está en el controlador.
+      cronometro.reset();
       final estabaEntrenando = _entrenando;
       final pose = resultado.poses.isEmpty ? null : resultado.poses.first;
       final anuncio = _entreno.procesar(pose, DateTime.now());
+      final msLogica = cronometro.elapsedMicroseconds / 1000;
       _anunciar(anuncio);
       if (!estabaEntrenando && _entrenando) _alEmpezarEntrenamiento();
+
+      if (medidor != null) {
+        medidor.frameAnalizado(DateTime.now(),
+            msDeteccion: msDeteccion, msLogica: msLogica);
+        medidor.tamanoImagen(resultado.tamanoImagen.width.round(),
+            resultado.tamanoImagen.height.round());
+      }
 
       setState(() => _resultado = resultado);
     } catch (e) {
@@ -453,6 +483,7 @@ class _PantallaCamaraState extends State<PantallaCamara>
     WakelockPlus.disable(); // fuera de esta pantalla, comportamiento normal
     // El resto de la app está diseñado en vertical.
     SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+    _guardarDiagnostico(); // Fase I.1 (antes de soltar la cámara)
     _generacionCamara++; // ningún frame en vuelo debe tocar el estado
     _liberarControlador(_controlador);
     _detectorPose.cerrar();
@@ -505,6 +536,7 @@ class _PantallaCamaraState extends State<PantallaCamara>
           _avisoOrientacion(horizontal),
         if (_entrenando && !_entreno.pausado) _hudContador(horizontal),
         _panelInferior(ahora, horizontal),
+        if (_medidor != null) _panelDiagnostico(),
         if (_cambiandoCamara)
           const Positioned.fill(
             child: ColoredBox(
@@ -1074,6 +1106,74 @@ class _PantallaCamaraState extends State<PantallaCamara>
               : const Text('Terminar entrenamiento'),
         ),
       ],
+    );
+  }
+
+
+    // --- Diagnóstico (Fase I.1) ---
+
+  /// Panel con las cifras de rendimiento en vivo. Es Positioned (regla del
+  /// Stack: nunca un hijo sin posicionar → pantalla negra).
+  Widget _panelDiagnostico() {
+    final m = _medidor!.instantanea(DateTime.now());
+    final fpsBajo = m.fpsAnalisis < 12;
+    String f(double v) => v.toStringAsFixed(1);
+    final tamano = m.ancho == null ? '' : '\n${m.ancho}×${m.alto}';
+    return Positioned(
+      top: 0,
+      right: 0,
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.only(top: 56, right: 16),
+          child: IgnorePointer(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colores.oscuro.withValues(alpha: 0.8),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: fpsBajo ? Colores.acento : Colores.ok,
+                  width: 1.5,
+                ),
+              ),
+              child: Text(
+                'CÁM  ${f(m.fpsCamara)} fps\n'
+                'ML   ${f(m.fpsAnalisis)} fps\n'
+                'DET  ${m.msDeteccion.toStringAsFixed(0)} ms\n'
+                'LÓG  ${f(m.msLogica)} ms\n'
+                'DESC ${m.pctDescartados.toStringAsFixed(0)} %'
+                '$tamano',
+                style: const TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 11,
+                  height: 1.35,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Guarda el resumen de rendimiento de esta visita (solo en modo
+  /// diagnóstico). Se llama desde dispose, así cubre "Terminar" y la "X".
+  /// No se espera (dispose no puede ser async); si falla, solo se pierde
+  /// esa fila del registro.
+  void _guardarDiagnostico() {
+    final medidor = _medidor;
+    if (medidor == null) return;
+    final resumen = medidor.resumen();
+    if (resumen.framesAnalizados < 30) return; // demasiado corto para servir
+    ServicioRegistroRendimiento.agregar(
+      ejercicioId: widget.receta.id,
+      camara: _camaraActiva?.lensDirection == CameraLensDirection.back
+          ? 'trasera'
+          : 'frontal',
+      resolucion: _resolucion.name,
+      resumen: resumen,
     );
   }
 
