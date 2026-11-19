@@ -1,6 +1,10 @@
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 
 import '../core/contexto_regla.dart';
+import '../core/suavizador_pose.dart';
+
+// Las recetas usan ParametrosSuavizado sin importar nada más.
+export '../core/suavizador_pose.dart' show ParametrosSuavizado;
 
 // ---------------------------------------------------------------------------
 // CONTRATO DE LAS RECETAS
@@ -102,7 +106,7 @@ class DeteccionRepeticion {
 ///
 /// 1. INSTANTÁNEA: se revisa en cada frame (ej. "pecho arriba").
 ///    Para evitar falsos avisos por ruido, el error solo se activa si se
-///    cumple durante [framesMinimos] frames seguidos.
+///    cumple durante [msMinimos] milisegundos seguidos (Fase I.5).
 ///
 /// 2. AL COMPLETAR: mide algo durante toda la repetición (ej. el ángulo
 ///    mínimo alcanzado) y decide al final si fue suficiente
@@ -118,7 +122,18 @@ class ReglaForma {
 
   // --- Instantánea ---
   final Set<FaseMovimiento> fases;
+
+  /// Frames "de referencia" (a 20 FPS) que debe cumplirse la condición.
+  /// Se conserva para no reescribir las recetas: el motor usa [msMinimos].
   final int framesMinimos;
+
+  /// Fase I.5: tiempo mínimo (ms) que debe cumplirse la condición para
+  /// activar el error, igual en cualquier teléfono. Si no se indica, se
+  /// deriva de [framesMinimos] a 20 FPS: 3 frames → 100 ms, 2 → 50 ms.
+  final int msMinimos;
+
+  /// Intervalo entre frames a 20 FPS (la referencia de los umbrales).
+  static const int msPorFrameReferencia = 50;
   final bool Function(ContextoRegla ctx)? condicion;
 
   // --- Al completar ---
@@ -135,7 +150,10 @@ class ReglaForma {
     this.articulaciones = const [],
     this.fases = fasesDeMovimiento,
     this.framesMinimos = 3,
-  })  : medida = null,
+    int? msMinimos,
+  })  : msMinimos =
+            msMinimos ?? (framesMinimos - 1) * msPorFrameReferencia,
+        medida = null,
         agregado = AgregadoRep.minimo,
         condicionRep = null;
 
@@ -150,7 +168,8 @@ class ReglaForma {
     this.articulaciones = const [],
   })  : condicion = null,
         fases = const {},
-        framesMinimos = 1;
+        framesMinimos = 1,
+        msMinimos = 0;
 
   bool get esAlCompletar => condicionRep != null;
 
@@ -188,9 +207,10 @@ class RecetaEjercicio {
   /// Reps más rápidas que esto se ignoran (suelen ser ruido).
   final double duracionMinimaRep;
 
-  /// Cuánto se suaviza la pose (ver SuavizadorPose). 0.6 por defecto;
-  /// más alto = menos retraso, útil en movimientos rápidos.
-  final double alfaSuavizado;
+  /// Cuánto se suaviza la pose (filtro One Euro, ver SuavizadorPose).
+  /// El valor por defecto sirve para movimientos normales; los ejercicios
+  /// explosivos (jumping jacks) usan ParametrosSuavizado.rapido.
+  final ParametrosSuavizado suavizado;
   final List<ReglaForma> reglasForma;
 
   const RecetaEjercicio({
@@ -205,7 +225,7 @@ class RecetaEjercicio {
     this.mensajePosicion = 'Colócate en posición',
     this.deteccionRepeticion,
     this.duracionMinimaRep = 0.5,
-    this.alfaSuavizado = 0.6,
+    this.suavizado = ParametrosSuavizado.porDefecto,
     this.reglasForma = const [],
   });
 }

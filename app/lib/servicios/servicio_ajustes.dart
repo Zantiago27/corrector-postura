@@ -31,6 +31,10 @@ class Ajustes {
   /// sesión en el teléfono (para pruebas de rendimiento).
   final bool modoDiagnostico;
 
+  /// Fase I.6: "Modo rendimiento" (cámara en calidad baja). Lo elige el
+  /// usuario o se activa solo si el teléfono no alcanza ~12 FPS.
+  final bool calidadReducida;
+
   const Ajustes({
     this.tono = 1.0,
     this.velocidad = 0.5,
@@ -38,6 +42,7 @@ class Ajustes {
     this.vozActiva = true,
     this.reconocimientoSoloDispositivo = true,
     this.modoDiagnostico = false,
+    this.calidadReducida = false,
   });
 
   /// Idioma para el TTS (flutter_tts).
@@ -54,6 +59,7 @@ class Ajustes {
     bool? vozActiva,
     bool? reconocimientoSoloDispositivo,
     bool? modoDiagnostico,
+    bool? calidadReducida,
   }) =>
       Ajustes(
         tono: tono ?? this.tono,
@@ -63,6 +69,7 @@ class Ajustes {
         reconocimientoSoloDispositivo:
             reconocimientoSoloDispositivo ?? this.reconocimientoSoloDispositivo,
         modoDiagnostico: modoDiagnostico ?? this.modoDiagnostico,
+        calidadReducida: calidadReducida ?? this.calidadReducida,
       );
 }
 
@@ -75,6 +82,7 @@ class ServicioAjustes {
   static const _vozActiva = 'ajustes_voz_activa';
   static const _soloDispositivo = 'ajustes_stt_solo_dispositivo';
   static const _diagnostico = 'ajustes_modo_diagnostico';
+  static const _calidadReducida = 'ajustes_calidad_reducida';
 
   static Future<Ajustes> cargar() async {
     final p = await SharedPreferences.getInstance();
@@ -89,6 +97,7 @@ class ServicioAjustes {
       reconocimientoSoloDispositivo:
           p.getBool(_soloDispositivo) ?? def.reconocimientoSoloDispositivo,
       modoDiagnostico: p.getBool(_diagnostico) ?? def.modoDiagnostico,
+      calidadReducida: p.getBool(_calidadReducida) ?? def.calidadReducida,
     );
   }
 
@@ -100,5 +109,6 @@ class ServicioAjustes {
     await p.setBool(_vozActiva, a.vozActiva);
     await p.setBool(_soloDispositivo, a.reconocimientoSoloDispositivo);
     await p.setBool(_diagnostico, a.modoDiagnostico);
+    await p.setBool(_calidadReducida, a.calidadReducida);
   }
 }

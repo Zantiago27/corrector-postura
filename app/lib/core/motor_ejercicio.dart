@@ -3,6 +3,7 @@ import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 import '../ejercicios/receta_ejercicio.dart';
 import 'contexto_regla.dart';
 import 'geometria.dart';
+import 'racha.dart';
 import 'suavizador_pose.dart';
 
 // Para no romper los imports existentes (pantalla_camara usa FaseMovimiento
@@ -84,34 +85,41 @@ class MotorEjercicio {
   /// Confianza mínima de ML Kit para considerar visible una articulación.
   static const double umbralVisibilidad = 0.5;
 
-  /// Frames seguidos que debe durar un cambio de fase para aceptarlo.
-  /// Filtra picos de un solo frame (ruido o un frame mal detectado).
+  /// Fase I.5: un cambio de fase se acepta si se mantiene al menos
+  /// [confirmacionFase] Y [framesConfirmacion] frames seguidos. Filtra picos
+  /// (ruido o un frame mal detectado) igual en cualquier teléfono:
+  ///   - 20 FPS: 2 frames (como antes).
+  ///   - 30 FPS: 3 frames (un parpadeo de 2 frames ya no cuenta).
+  ///   - 10 FPS: 2 frames (no suma retraso).
+  static const confirmacionFase = Duration(milliseconds: 50);
   static const int framesConfirmacion = 2;
 
   /// Ventaja de confianza que necesita el otro lado para cambiar de lado.
   static const double _margenCambioLado = 0.15;
 
-  MotorEjercicio(this.receta, {double? alfaSuavizado})
+  MotorEjercicio(this.receta, {ParametrosSuavizado? suavizado})
       : _suavizador =
-            SuavizadorPose(alfa: alfaSuavizado ?? receta.alfaSuavizado);
+            SuavizadorPose(parametros: suavizado ?? receta.suavizado);
 
   // --- Conteo ---
   int _repeticiones = 0;
   int _repsCorrectas = 0;
   int _repsIncorrectas = 0;
   FaseMovimiento _fase = FaseMovimiento.reposo;
-  int _framesEnReposo = 0;
-  int _framesFueraReposo = 0;
-  int _framesEnExtremo = 0;
-  int _framesFueraExtremo = 0;
+
+  // Rachas de cada condición del conteo (Fase I.5: por tiempo).
+  final _enReposo = Racha();
+  final _fueraReposo = Racha();
+  final _enExtremo = Racha();
+  final _fueraExtremo = Racha();
 
   // --- Repetición en curso ---
   DateTime? _inicioRep;
   final Map<String, ReglaForma> _erroresRepActual = {};
   final Map<String, double> _agregadosRep = {};
 
-  // --- Reglas instantáneas: frames seguidos que lleva cumpliéndose cada una ---
-  final Map<String, int> _framesSeguidos = {};
+  // --- Reglas instantáneas: desde cuándo se cumple cada una (Fase I.5) ---
+  final Map<String, Racha> _rachasReglas = {};
 
   // --- Isométricos ---
   double _segundosMantenidos = 0;
@@ -144,11 +152,10 @@ class MotorEjercicio {
   void pausar() {
     _ultimoInstante = null;
     _suavizador.reiniciar();
-    _framesSeguidos.clear();
-    _framesEnReposo = 0;
-    _framesFueraReposo = 0;
-    _framesEnExtremo = 0;
-    _framesFueraExtremo = 0;
+    _rachasReglas.clear();
+    for (final r in [_enReposo, _fueraReposo, _enExtremo, _fueraExtremo]) {
+      r.reiniciar();
+    }
   }
 
   // =========================================================================
@@ -242,7 +249,7 @@ class MotorEjercicio {
       // Fuera de posición: no contamos ni corregimos; la rep en curso se pierde.
       _fase = FaseMovimiento.reposo;
       _descartarRepEnCurso();
-      _framesSeguidos.clear();
+      _rachasReglas.clear();
       return EvaluacionFrame(
         valorPrincipal: valor,
         repeticiones: _repeticiones,
@@ -257,7 +264,7 @@ class MotorEjercicio {
     final repCompletada = _actualizarFase(det, valor, ahora);
 
     // 2) Reglas instantáneas de la fase actual.
-    final activas = _reglasInstantaneasActivas(ctx, _fase);
+    final activas = _reglasInstantaneasActivas(ctx, _fase, ahora);
 
     // 3) Si hay una rep en curso, acumulamos sus datos.
     if (_fase != FaseMovimiento.reposo) {
@@ -278,7 +285,7 @@ class MotorEjercicio {
     );
   }
 
-  /// Máquina de estados con histéresis y confirmación por frames:
+  /// Máquina de estados con histéresis y confirmación por tiempo (I.5):
   ///
   ///   reposo --(sale de reposo)--> ida --(llega al extremo)--> extremo
   ///   extremo --(sale del extremo)--> vuelta --(llega a reposo)--> reposo [+1 rep]
@@ -288,40 +295,44 @@ class MotorEjercicio {
       DeteccionRepeticion det, double valor, DateTime ahora) {
     final enReposo = det.estaEnReposo(valor);
     final enExtremo = det.estaEnExtremo(valor);
-    _framesEnReposo = enReposo ? _framesEnReposo + 1 : 0;
-    _framesFueraReposo = enReposo ? 0 : _framesFueraReposo + 1;
-    _framesEnExtremo = enExtremo ? _framesEnExtremo + 1 : 0;
-    _framesFueraExtremo = enExtremo ? 0 : _framesFueraExtremo + 1;
+    _enReposo.actualizar(enReposo, ahora);
+    _fueraReposo.actualizar(!enReposo, ahora);
+    _enExtremo.actualizar(enExtremo, ahora);
+    _fueraExtremo.actualizar(!enExtremo, ahora);
+
+    // ¿La condición ya se mantuvo lo suficiente?
+    bool confirmado(Racha r) => r.confirmada(ahora,
+        minimo: confirmacionFase, frames: framesConfirmacion);
 
     switch (_fase) {
       case FaseMovimiento.reposo:
-        if (_framesFueraReposo >= framesConfirmacion) {
+        if (confirmado(_fueraReposo)) {
           _fase = FaseMovimiento.ida;
           _empezarRep(ahora);
         }
         return null;
 
       case FaseMovimiento.ida:
-        if (_framesEnExtremo >= framesConfirmacion) {
+        if (confirmado(_enExtremo)) {
           _fase = FaseMovimiento.extremo;
-        } else if (_framesEnReposo >= framesConfirmacion) {
+        } else if (confirmado(_enReposo)) {
           _fase = FaseMovimiento.reposo; // amago
           _descartarRepEnCurso();
         }
         return null;
 
       case FaseMovimiento.extremo:
-        if (_framesFueraExtremo >= framesConfirmacion) {
+        if (confirmado(_fueraExtremo)) {
           _fase = FaseMovimiento.vuelta;
         }
         return null;
 
       case FaseMovimiento.vuelta:
-        if (_framesEnReposo >= framesConfirmacion) {
+        if (confirmado(_enReposo)) {
           _fase = FaseMovimiento.reposo;
           return _cerrarRep(ahora);
         }
-        if (_framesEnExtremo >= framesConfirmacion) {
+        if (confirmado(_enExtremo)) {
           _fase = FaseMovimiento.extremo; // volvió a bajar
         }
         return null;
@@ -403,9 +414,10 @@ class MotorEjercicio {
   /// en posición y sin errores.
   EvaluacionFrame _evaluarIsometrico(
       ContextoRegla ctx, bool enPosicion, DateTime ahora) {
-    final activas =
-        enPosicion ? _reglasInstantaneasActivas(ctx, null) : <ReglaForma>[];
-    if (!enPosicion) _framesSeguidos.clear();
+    final activas = enPosicion
+        ? _reglasInstantaneasActivas(ctx, null, ahora)
+        : <ReglaForma>[];
+    if (!enPosicion) _rachasReglas.clear();
     final formaCorrecta = enPosicion && activas.isEmpty;
 
     if (formaCorrecta) {
@@ -432,25 +444,31 @@ class MotorEjercicio {
 
   // --- Reglas instantáneas --------------------------------------------------
 
-  /// Evalúa las reglas instantáneas y devuelve las ACTIVAS (las que llevan
-  /// [ReglaForma.framesMinimos] frames seguidos cumpliéndose), ordenadas por
-  /// prioridad. Si [fase] es null (isométricos) se ignora el filtro de fase.
+  /// Evalúa las reglas instantáneas y devuelve las ACTIVAS, ordenadas por
+  /// prioridad. Una regla se activa cuando su condición lleva cumpliéndose
+  /// al menos [ReglaForma.msMinimos] (y 2 frames; Fase I.5).
+  /// Si [fase] es null (isométricos) se ignora el filtro de fase.
   List<ReglaForma> _reglasInstantaneasActivas(
-      ContextoRegla ctx, FaseMovimiento? fase) {
+      ContextoRegla ctx, FaseMovimiento? fase, DateTime ahora) {
     final activas = <ReglaForma>[];
     for (final regla in receta.reglasForma) {
       final condicion = regla.condicion;
       if (regla.esAlCompletar || condicion == null) continue;
 
+      final racha = _rachasReglas.putIfAbsent(regla.id, Racha.new);
       final aplica = fase == null || regla.fases.contains(fase);
       if (!aplica) {
-        _framesSeguidos[regla.id] = 0;
+        racha.reiniciar();
         continue;
       }
-      final seguidos =
-          condicion(ctx) ? (_framesSeguidos[regla.id] ?? 0) + 1 : 0;
-      _framesSeguidos[regla.id] = seguidos;
-      if (seguidos >= regla.framesMinimos) activas.add(regla);
+      racha.actualizar(condicion(ctx), ahora);
+      final confirmada = racha.confirmada(
+        ahora,
+        minimo: Duration(milliseconds: regla.msMinimos),
+        // Con framesMinimos = 1 basta un frame; si no, al menos 2.
+        frames: regla.framesMinimos < 2 ? regla.framesMinimos : 2,
+      );
+      if (confirmada) activas.add(regla);
     }
     _ordenarPorPrioridad(activas);
     return activas;

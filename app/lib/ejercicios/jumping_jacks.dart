@@ -44,8 +44,8 @@ double? _aperturaPiernas(ContextoRegla ctx) {
 ///   - Abierto (extremo):  > 120°
 ///   - Brazos completos:   >= 150° (manos sobre la cabeza)
 ///
-/// Es un movimiento rápido: se suaviza menos (alfa 0.8) para no ir con
-/// retraso, y se aceptan reps cortas (0.3 s).
+/// Es un movimiento rápido: usa el suavizado "rápido" (One Euro con más
+/// beta) para no ir con retraso, y se aceptan reps cortas (0.3 s).
 final recetaJumpingJacks = RecetaEjercicio(
   id: 'jumping_jack',
   nombre: 'Jumping jacks',
@@ -63,7 +63,7 @@ final recetaJumpingJacks = RecetaEjercicio(
     PoseLandmarkType.leftAnkle,
     PoseLandmarkType.rightAnkle,
   ],
-  alfaSuavizado: 0.8,
+  suavizado: ParametrosSuavizado.rapido,
   deteccionRepeticion: const DeteccionRepeticion(
     metrica: _aperturaBrazos,
     umbralExtremo: 120,

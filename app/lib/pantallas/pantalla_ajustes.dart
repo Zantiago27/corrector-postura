@@ -120,6 +120,9 @@ class _PantallaAjustesState extends State<PantallaAjustes> {
                 _titulo('Privacidad'),
                 _seccionPrivacidad(),
                 const SizedBox(height: 24),
+                _titulo('Cámara'),
+                _seccionCamara(),
+                const SizedBox(height: 24),
                 _titulo('Diagnóstico'),
                 _seccionDiagnostico(),
               ],
@@ -323,7 +326,29 @@ class _PantallaAjustesState extends State<PantallaAjustes> {
     );
   }
 
-    // --- Diagnóstico (Fase I.1) ---
+    // --- Cámara (Fase I.6) ---
+  Widget _seccionCamara() {
+    final a = _ajustes;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 6, 16, 6),
+      decoration: Componentes.tarjeta(),
+      child: SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        activeTrackColor: Colores.acento,
+        title: Text('Modo rendimiento',
+            style: Tipografia.manrope(14, peso: FontWeight.w700)),
+        subtitle: Text(
+          'Usa menos resolución de cámara para que el análisis vaya fluido '
+          'en teléfonos lentos. Se activa solo si tu teléfono lo necesita.',
+          style: Tipografia.manrope(12.5, color: Colores.suave),
+        ),
+        value: a.calidadReducida,
+        onChanged: (v) => _cambiar(a.copyWith(calidadReducida: v)),
+      ),
+    );
+  }
+
+  // --- Diagnóstico (Fase I.1) ---
   Widget _seccionDiagnostico() {
     final a = _ajustes;
     return Container(

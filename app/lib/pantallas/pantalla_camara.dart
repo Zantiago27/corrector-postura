@@ -8,6 +8,7 @@ import '../config/tema.dart';
 import '../core/coach_entrenamiento.dart';
 import '../core/medidor_rendimiento.dart';
 import '../core/controlador_entrenamiento.dart';
+import '../core/gestor_calidad.dart';
 import '../ejercicios/instrucciones_ejercicio.dart';
 import '../ejercicios/receta_ejercicio.dart';
 import '../ml/detector_pose.dart';
@@ -35,6 +36,10 @@ import 'widgets_coaching.dart';
 /// destello, diagnóstico) escuchan a [_frame]; el resto solo se reconstruye
 /// con setState cuando cambia la "estructura" (estado de la sesión o
 /// encuadre), algo que pasa pocas veces por serie.
+///
+/// Fase I.6: calidad adaptativa. Si el teléfono no alcanza ~12 FPS de
+/// análisis, se baja la resolución (una vez, en un momento que no moleste)
+/// y se recuerda como "Modo rendimiento" en Ajustes.
 class PantallaCamara extends StatefulWidget {
   final List<CameraDescription> camaras;
   final RecetaEjercicio receta;
@@ -81,9 +86,16 @@ class _PantallaCamaraState extends State<PantallaCamara>
   /// (aparecen/desaparecen capas, cambian botones).
   (EstadoSesion, bool)? _ultimaEstructura;
 
-  /// Calidad pedida a la cámara. (En I.6 podrá bajar sola si los FPS no
-  /// alcanzan; por eso ya vive en una variable.)
-  final ResolutionPreset _resolucion = ResolutionPreset.medium;
+  /// Calidad pedida a la cámara: medium, o low en "Modo rendimiento"
+  /// (elegido en Ajustes o activado solo por [_gestorCalidad]).
+  ResolutionPreset _resolucion = ResolutionPreset.medium;
+
+  // --- Calidad adaptativa (Fase I.6) ---
+  final GestorCalidad _gestorCalidad = GestorCalidad();
+
+  /// El gestor pidió bajar la calidad y esperamos un buen momento
+  /// (preparándose o en pausa) para recrear la cámara.
+  bool _bajarCalidadPendiente = false;
 
   /// FPS que se piden a la cámara (Fase I.2). Para comparar con el modo
   /// diagnóstico sin pedir nada, pon [_pedirFpsACamara] en false.
@@ -124,8 +136,7 @@ class _PantallaCamaraState extends State<PantallaCamara>
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
 
     _entreno = ControladorEntrenamiento(widget.receta);
-    _iniciarCamara();
-    _cargarAjustes();
+    _arrancar(); // ajustes → cámara (con la calidad correcta) + voz
     _comandos.alFallarEnDispositivo = _alFallarComandosEnDispositivo;
     // Mientras el entrenador habla, pausamos la escucha para no oírnos a
     // nosotros mismos; al terminar, reanudamos.
@@ -145,15 +156,24 @@ class _PantallaCamaraState extends State<PantallaCamara>
     if (mounted) setState(() {});
   }
 
-  /// Aplica las preferencias guardadas (voz y privacidad del micrófono).
-  Future<void> _cargarAjustes() async {
+  /// Fase I.6: primero se leen las preferencias (es rápido), así la cámara
+  /// arranca ya con la calidad correcta; luego cámara y voz en paralelo.
+  Future<void> _arrancar() async {
     final a = await ServicioAjustes.cargar();
+    if (!mounted) return;
+    if (a.calidadReducida) _resolucion = ResolutionPreset.low;
+    if (a.modoDiagnostico) _medidor ??= MedidorRendimiento();
+    _iniciarCamara();
+    _aplicarAjustes(a);
+  }
+
+  /// Aplica las preferencias de voz y privacidad del micrófono.
+  Future<void> _aplicarAjustes(Ajustes a) async {
     await _voz.inicializar(
         tono: a.tono, velocidad: a.velocidad, idioma: a.idiomaVoz);
     _comandos
       ..soloDispositivo = a.reconocimientoSoloDispositivo
       ..localeId = a.idiomaReconocimiento;
-    if (a.modoDiagnostico) _medidor ??= MedidorRendimiento();
     if (mounted) setState(() => _vozActiva = a.vozActiva);
   }
 
@@ -267,6 +287,7 @@ class _PantallaCamaraState extends State<PantallaCamara>
         return;
       }
       await _arrancarStream(controlador, generacion);
+      _gestorCalidad.reiniciar(); // cámara nueva: se vuelve a medir
       setState(() {
         _controlador = controlador;
         _inicializando = false;
@@ -324,6 +345,11 @@ class _PantallaCamaraState extends State<PantallaCamara>
       return;
     }
 
+    await _recrearCamara(nueva.first);
+  }
+
+  /// Cambia el controlador de forma segura (otra lente u otra calidad).
+  Future<void> _recrearCamara(CameraDescription camara) async {
     // 1) Sacamos el controlador de la UI ANTES de liberarlo: así
     //    CameraPreview nunca se dibuja con un controlador destruido.
     final anterior = _controlador;
@@ -331,14 +357,49 @@ class _PantallaCamaraState extends State<PantallaCamara>
     setState(() {
       _cambiandoCamara = true;
       _controlador = null;
-      _resultado = null; // el esqueleto viejo tenía otra rotación/espejo
+      _resultado = null; // el esqueleto viejo tenía otra rotación/tamaño
     });
     if (_entrenando) _entreno.pausar();
 
     // 2) Liberamos la cámara vieja y 3) creamos la nueva.
     await _liberarControlador(anterior);
     if (!mounted) return;
-    await _crearControlador(nueva.first);
+    await _crearControlador(camara);
+  }
+
+  // ===========================================================================
+  // CALIDAD ADAPTATIVA (Fase I.6)
+  // ===========================================================================
+
+  /// Se llama tras cada frame analizado. Si el teléfono no alcanza
+  /// [GestorCalidad.fpsMinimo], baja la resolución, pero solo en un momento
+  /// que no moleste: preparándose o en pausa (nunca a mitad de una serie
+  /// ni durante el 3-2-1).
+  void _revisarCalidad(DateTime ahora) {
+    if (_resolucion == ResolutionPreset.low) return; // ya está al mínimo
+    if (_gestorCalidad.frameAnalizado(ahora)) _bajarCalidadPendiente = true;
+    final buenMomento =
+        _entreno.estado == EstadoSesion.preparando || _entreno.pausado;
+    if (_bajarCalidadPendiente && buenMomento && !_cambiandoCamara) {
+      _bajarCalidad();
+    }
+  }
+
+  Future<void> _bajarCalidad() async {
+    final camara = _camaraActiva;
+    if (camara == null) return;
+    _bajarCalidadPendiente = false;
+    _resolucion = ResolutionPreset.low;
+    // Se recuerda en este teléfono: la próxima vez arranca ya en calidad baja.
+    ServicioAjustes.cargar().then(
+        (a) => ServicioAjustes.guardar(a.copyWith(calidadReducida: true)));
+    await _recrearCamara(camara);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      content: Text('Tu teléfono iba lento: activamos el modo rendimiento '
+          '(menos resolución). Puedes cambiarlo en Ajustes.'),
+      duration: Duration(seconds: 5),
+    ));
   }
 
   /// Libera la cámara al pasar a segundo plano y la recupera al volver.
@@ -417,6 +478,7 @@ class _PantallaCamaraState extends State<PantallaCamara>
 
       _resultado = resultado;
       _notificarFrame();
+      _revisarCalidad(DateTime.now()); // Fase I.6 (después de dibujar)
     } catch (e) {
       debugPrint('Error procesando frame: $e');
     } finally {
@@ -1201,7 +1263,7 @@ class _PantallaCamaraState extends State<PantallaCamara>
 
   Widget _contenidoDiagnostico() {
     final m = _medidor!.instantanea(DateTime.now());
-    final fpsBajo = m.fpsAnalisis < 12;
+    final fpsBajo = m.fpsAnalisis < GestorCalidad.fpsMinimo;
     String f(double v) => v.toStringAsFixed(1);
     final tamano = m.ancho == null ? '' : '\n${m.ancho}×${m.alto}';
     return Container(
